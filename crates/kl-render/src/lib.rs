@@ -184,7 +184,7 @@ impl Renderer {
         };
         fallbacks.retain(|id| *id != family);
         fallbacks.insert(0, family);
-        fonts.collection.set_generic_families(parley::GenericFamily::SansSerif, fallbacks);
+        fonts.collection.set_generic_families(parley::GenericFamily::SansSerif, fallbacks.into_iter());
         let (w, h) = (width as u16, height as u16);
         Ok(Renderer {
             width: w,
