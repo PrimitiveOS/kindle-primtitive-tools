@@ -51,6 +51,18 @@ pub enum Screen {
 pub enum Input {
     Tap(f32, f32),
     LongTap(f32, f32),
+    /// A touch that crossed the long-press threshold while the finger is still down.
+    HoldStart(f32, f32),
+    /// The current point during a held drag, sampled at an e-ink-safe rate.
+    HoldPan(f32, f32),
+    /// End of a hold gesture. `held_ms` includes the full touch duration.
+    HoldRelease {
+        start_x: f32,
+        start_y: f32,
+        x: f32,
+        y: f32,
+        held_ms: u32,
+    },
     /// A swipe: the distance moved, and the height where the finger went down (pixels).
     Swipe { dx: f32, dy: f32, start_y: f32 },
     PageForward,
@@ -1564,6 +1576,11 @@ impl Ui {
 
     pub fn handle(&mut self, input: Input) -> Action {
         self.pressed_key = None;
+        let input = match input {
+            Input::HoldStart(..) | Input::HoldPan(..) => return Action::None,
+            Input::HoldRelease { start_x, start_y, .. } => Input::LongTap(start_x, start_y),
+            input => input,
+        };
         // While the drive is shown on a computer, the screen takes no taps: the Kindle's files are changing.
         if self.usb == Usb::Drive && !matches!(input, Input::Sleep | Input::Wake) {
             return Action::None;
@@ -2923,6 +2940,26 @@ mod tests {
         assert_eq!(u.apps().len(), before);
         assert_eq!(u.hidden_count(), 0);
         assert_eq!(u.show_all(), Action::None);
+    }
+
+    #[test]
+    fn hold_lifecycle_keeps_launcher_long_press_on_release() {
+        let mut u = ui(1);
+        let cell = u.layout.cell(0);
+        let (x, y) = (cell.x as f32 + 5.0, cell.y as f32 + 5.0);
+        assert_eq!(u.handle(Input::HoldStart(x, y)), Action::None);
+        assert_eq!(u.handle(Input::HoldPan(x + 20.0, y)), Action::None);
+        assert_eq!(
+            u.handle(Input::HoldRelease {
+                start_x: x,
+                start_y: y,
+                x: x + 20.0,
+                y,
+                held_ms: 1_100,
+            }),
+            Action::Redraw { full: false }
+        );
+        assert_eq!(u.screen, Screen::AppMenu);
     }
 
     fn tap(u: &mut Ui, r: crate::layout::Rect) -> Action {
