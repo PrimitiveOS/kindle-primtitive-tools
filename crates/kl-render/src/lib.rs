@@ -343,10 +343,24 @@ impl Renderer {
     }
 
     fn text_with_wrap(&mut self, t: Text, overflow: parley::OverflowWrap) -> f32 {
+        self.text_with_emphasis(t, overflow, None)
+    }
+
+    fn text_with_emphasis(
+        &mut self,
+        t: Text,
+        overflow: parley::OverflowWrap,
+        emphasis: Option<std::ops::Range<usize>>,
+    ) -> f32 {
         let mut content = t.text.to_string();
+        let mut source_end = content.len();
         // Shorten until it fits in `lines` lines.
         loop {
-            let layout = self.layout_with_wrap(&content, t.size, t.bold, t.w, overflow);
+            let visible_emphasis = emphasis.as_ref().and_then(|range| {
+                let end = range.end.min(source_end);
+                (range.start < end).then_some(range.start..end)
+            });
+            let layout = self.layout_with_emphasis(&content, t.size, t.bold, t.w, overflow, visible_emphasis);
             let count = layout.lines().count();
             if count <= t.lines || content.chars().count() <= 1 {
                 return self.draw_layout(&layout, &t);
@@ -355,7 +369,10 @@ impl Renderer {
             let mut chars: Vec<char> = keep.chars().collect();
             let drop = (chars.len() / 10).max(1);
             chars.truncate(chars.len().saturating_sub(drop));
-            content = format!("{}…", chars.into_iter().collect::<String>().trim_end());
+            content = chars.into_iter().collect();
+            source_end = content.trim_end().len();
+            content.truncate(source_end);
+            content.push('…');
         }
     }
 
@@ -364,14 +381,29 @@ impl Renderer {
     }
 
     fn layout_with_wrap(&mut self, text: &str, size: f32, bold: bool, w: f32, overflow: parley::OverflowWrap) -> parley::Layout<()> {
+        self.layout_with_emphasis(text, size, bold, w, overflow, None)
+    }
+
+    fn layout_with_emphasis(
+        &mut self,
+        text: &str,
+        size: f32,
+        bold: bool,
+        width: f32,
+        overflow: parley::OverflowWrap,
+        emphasis: Option<std::ops::Range<usize>>,
+    ) -> parley::Layout<()> {
         let size = if self.large_text { size * 1.15 } else { size };
         let mut builder = self.layout_cx.ranged_builder(&mut self.fonts, text, 1.0, true);
         builder.push_default(StyleProperty::FontSize(size));
         builder.push_default(StyleProperty::FontWeight(if bold { FontWeight::BOLD } else { FontWeight::NORMAL }));
         builder.push_default(StyleProperty::LineHeight(parley::LineHeight::FontSizeRelative(1.25)));
         builder.push_default(StyleProperty::OverflowWrap(overflow));
+        if let Some(range) = emphasis {
+            builder.push(StyleProperty::FontWeight(FontWeight::BOLD), range);
+        }
         let mut layout: parley::Layout<()> = builder.build(text);
-        layout.break_all_lines(Some(w));
+        layout.break_all_lines(Some(width));
         layout
     }
 

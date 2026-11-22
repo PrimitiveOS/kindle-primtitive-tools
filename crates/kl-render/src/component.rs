@@ -147,6 +147,30 @@ impl Canvas {
     }
 
     pub fn text(&mut self, rect: Rect, content: &str, style: TextStyle) {
+        self.draw_text(rect, content, style, None);
+    }
+
+    /// Draw a bold UTF-8 byte range in the same shaped, wrapped paragraph.
+    /// Invalid or empty ranges use the unmodified text style.
+    pub fn emphasized_text(
+        &mut self,
+        rect: Rect,
+        content: &str,
+        style: TextStyle,
+        emphasis: std::ops::Range<usize>,
+    ) {
+        let range = (!emphasis.is_empty() && content.get(emphasis.clone()).is_some())
+            .then_some(emphasis);
+        self.draw_text(rect, content, style, range);
+    }
+
+    fn draw_text(
+        &mut self,
+        rect: Rect,
+        content: &str,
+        style: TextStyle,
+        emphasis: Option<std::ops::Range<usize>>,
+    ) {
         if rect.w <= 0 || rect.h <= 0 || style.lines == 0 {
             return;
         }
@@ -158,7 +182,7 @@ impl Canvas {
         let clip = super::kurbo::Shape::to_path(&super::krect(rect), 0.1);
         self.renderer.ctx.set_transform(super::Affine::IDENTITY);
         self.renderer.ctx.push_clip_layer(&clip);
-        self.renderer.text_with_wrap(
+        self.renderer.text_with_emphasis(
             Text {
                 text: content,
                 x: rect.x as f32,
@@ -171,6 +195,7 @@ impl Canvas {
                 gray: style.ink,
             },
             style.overflow,
+            emphasis,
         );
         self.renderer.ctx.pop_layer();
     }
@@ -493,6 +518,37 @@ impl TextStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the two Noto Sans static UI font files"]
+    fn emphasized_utf8_range_shapes_one_line_and_preserves_unstyled_prefix_pixels() {
+        let paths = std::env::var_os("KL_TEST_FONTS").expect("supply regular and bold Noto Sans");
+        let fonts: Vec<_> = std::env::split_paths(&paths)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let mut canvas = Canvas::new(1264, 180, &fonts).unwrap();
+        let rect = Rect::new(15, 18, 1220, 110);
+        let text = "Coast and café";
+        let at = text.find("café").unwrap();
+        let mut draw = |span: Option<std::ops::Range<usize>>| {
+            canvas.begin();
+            match span {
+                Some(range) => canvas.emphasized_text(rect, text, TextStyle::new(44), range),
+                None => canvas.text(rect, text, TextStyle::new(44)),
+            }
+            canvas.finish(false)
+        };
+        let plain = draw(None);
+        let styled = draw(Some(at..text.len()));
+        assert_eq!(plain, draw(Some(at..text.len() - 1)));
+        assert_eq!(plain, draw(Some(at..at)));
+        let changed: Vec<_> = plain.iter().zip(&styled).enumerate()
+            .filter_map(|(i, (a, b))| (a != b).then_some(i % 1264))
+            .collect();
+        assert!(changed.len() > 100);
+        assert!(changed.iter().all(|&x| x > rect.x as usize + 120));
+    }
+
 
     #[test]
     fn single_line_field_masks_characters_and_tracks_unicode_caret() {
