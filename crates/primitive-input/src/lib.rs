@@ -273,7 +273,10 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
                         || (last.1 - last_pan.1).abs() >= HOLD_PAN_MIN_DISTANCE)
                     && last_pan_at.elapsed() >= HOLD_PAN_INTERVAL
                 {
-                    report(Input::HoldPan(last.0, last.1), start.unwrap().0.0);
+                    report(
+                        Input::HoldPan(last.0, last.1),
+                        start.map_or(last.0, |(point, _)| point.0),
+                    );
                     last_pan = last;
                     last_pan_at = Instant::now();
                 }

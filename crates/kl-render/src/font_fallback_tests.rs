@@ -74,8 +74,8 @@ fn supplied_cjk_fallback_paints_real_popup_headwords_and_keeps_ascii_pixels() {
     let baseline = popup(&fonts, text);
     let rendered = popup(&supplied, text);
     assert_ne!(rendered, baseline);
-    assert!(rendered.iter().any(|pixel| *pixel == 0));
-    assert!(rendered.iter().any(|pixel| *pixel == 255));
+    assert!(rendered.contains(&0));
+    assert!(rendered.contains(&255));
     // Duplicate supplied paths cannot alter fallback ordering or pixels.
     supplied.extend(fonts);
     assert_eq!(rendered, popup(&supplied, text));
