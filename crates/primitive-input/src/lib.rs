@@ -28,6 +28,9 @@ const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 const KEY_PAGEUP: u16 = profile::ACTIVE.page_back_key;
 const KEY_PAGEDOWN: u16 = profile::ACTIVE.page_forward_key;
+const HOLD_START: Duration = Duration::from_millis(800);
+const HOLD_PAN_INTERVAL: Duration = Duration::from_millis(200);
+const HOLD_PAN_MIN_DISTANCE: f32 = 6.0;
 
 /// Turn a point from the panel's native (upright) frame into the screen's frame.
 pub fn turn_point(turn: u32, x: f32, y: f32) -> (f32, f32) {
@@ -101,6 +104,39 @@ fn read_event(file: &mut File) -> Option<InputEvent> {
     Some(unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const InputEvent) })
 }
 
+fn wait_for_event(file: &File, timeout: Option<Duration>) -> std::io::Result<bool> {
+    let timeout_ms = timeout.map_or(-1, |duration| {
+        duration.as_millis().min(i32::MAX as u128) as i32
+    });
+    let mut descriptor = libc::pollfd {
+        fd: file.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: descriptor is a valid, initialized pollfd for the open input file.
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result == 0 {
+            return Ok(false);
+        }
+        if result > 0 {
+            return Ok(descriptor.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn held_milliseconds(duration: Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+fn is_hold_threshold_reached(duration: Duration) -> bool {
+    duration >= HOLD_START
+}
+
 /// The gesture for a finished touch: from its start and end points and how long it was held.
 pub fn gesture(start: (f32, f32), end: (f32, f32), held: Duration) -> Input {
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
@@ -161,7 +197,27 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
     let mut start: Option<((f32, f32), u32)> = None;
     let mut last = (0.0f32, 0.0f32);
     let mut down_at = Instant::now();
+    let mut hold_started = false;
+    let mut last_pan = (0.0f32, 0.0f32);
+    let mut last_pan_at = down_at;
     loop {
+        let timeout = (active && start.is_some() && !hold_started)
+            .then(|| HOLD_START.saturating_sub(down_at.elapsed()));
+        let ready = match wait_for_event(&file, timeout) {
+            Ok(ready) => ready,
+            Err(error) => return log(&format!("touch poll failed: {error}")),
+        };
+        if !ready {
+            if active && !hold_started {
+                if let Some((point, _)) = start {
+                    report(Input::HoldStart(point.0, point.1), point.0);
+                    hold_started = true;
+                    last_pan = last;
+                    last_pan_at = Instant::now();
+                }
+            }
+            continue;
+        }
         let Some(ev) = read_event(&mut file) else {
             return log("touch read failed");
         };
@@ -171,10 +227,36 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
                     active = true;
                     start = None;
                     down_at = Instant::now();
+                    hold_started = false;
+                    last_pan = (0.0, 0.0);
+                    last_pan_at = down_at;
                 } else if active {
                     active = false;
                     if let Some((point, _)) = start {
-                        report(gesture(point, last, down_at.elapsed()), point.0);
+                        let held = down_at.elapsed();
+                        if hold_started || is_hold_threshold_reached(held) {
+                            if !hold_started {
+                                report(Input::HoldStart(point.0, point.1), point.0);
+                                hold_started = true;
+                            }
+                            if (last.0 - last_pan.0).abs() >= 1.0
+                                || (last.1 - last_pan.1).abs() >= 1.0
+                            {
+                                report(Input::HoldPan(last.0, last.1), point.0);
+                            }
+                            report(
+                                Input::HoldRelease {
+                                    start_x: point.0,
+                                    start_y: point.1,
+                                    x: last.0,
+                                    y: last.1,
+                                    held_ms: held_milliseconds(held),
+                                },
+                                point.0,
+                            );
+                        } else {
+                            report(gesture(point, last, held), point.0);
+                        }
                     }
                 }
             }
@@ -184,7 +266,17 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
                 // Use a single orientation for the gesture if the device turns mid-touch.
                 let turn = start.map_or_else(|| TURN.load(Ordering::Relaxed), |(_, turn)| turn);
                 last = turn_point(turn, scale(raw_x, &xi, NATIVE_W), scale(raw_y, &yi, NATIVE_H));
-                start.get_or_insert((last, turn));
+                if start.is_none() {
+                    start = Some((last, turn));
+                } else if hold_started
+                    && ((last.0 - last_pan.0).abs() >= HOLD_PAN_MIN_DISTANCE
+                        || (last.1 - last_pan.1).abs() >= HOLD_PAN_MIN_DISTANCE)
+                    && last_pan_at.elapsed() >= HOLD_PAN_INTERVAL
+                {
+                    report(Input::HoldPan(last.0, last.1), start.unwrap().0.0);
+                    last_pan = last;
+                    last_pan_at = Instant::now();
+                }
             }
             _ => {}
         }
@@ -236,5 +328,14 @@ mod tests {
         assert_eq!(gesture((10.0, 10.0), (20.0, 15.0), short), Input::Tap(10.0, 10.0));
         assert_eq!(gesture((10.0, 10.0), (20.0, 15.0), Duration::from_secs(1)), Input::LongTap(10.0, 10.0));
         assert_eq!(gesture((500.0, 10.0), (100.0, 30.0), short), Input::Swipe { dx: -400.0, dy: 20.0, start_y: 10.0 });
+    }
+
+    #[test]
+    fn held_selection_starts_at_the_long_press_threshold() {
+        assert!(!is_hold_threshold_reached(Duration::from_millis(799)));
+        assert!(is_hold_threshold_reached(Duration::from_millis(800)));
+        assert_eq!(held_milliseconds(Duration::from_millis(1_234)), 1_234);
+        assert_eq!(HOLD_PAN_INTERVAL, Duration::from_millis(200));
+        assert_eq!(HOLD_PAN_MIN_DISTANCE, 6.0);
     }
 }

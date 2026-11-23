@@ -7,6 +7,8 @@
 pub mod component;
 pub mod image;
 mod settings_management;
+#[cfg(test)]
+mod font_fallback_tests;
 
 use std::collections::HashMap;
 
@@ -181,18 +183,31 @@ impl Renderer {
     }
 
     /// A renderer for a `width` × `height` screen with the fonts at `font_paths` (Noto Sans regular and
-    /// bold). Fails when no font could be loaded.
+    /// bold), followed by optional script fallbacks in supplied path order.
+    /// Noto Sans retains priority for UI text. Fails when it could not be loaded.
     pub fn new(width: u32, height: u32, font_paths: &[String]) -> Result<Renderer, String> {
         let mut fonts = FontContext::new();
         let existing: Vec<&String> = font_paths.iter().filter(|p| std::fs::metadata(p).is_ok()).collect();
         if existing.is_empty() {
             return Err(format!("no fonts found in {font_paths:?}"));
         }
-        fonts.collection.load_fonts_from_paths(existing.iter().map(|p| p.as_str()));
+        let mut fallbacks = Vec::new();
+        for path in &existing {
+            let known: Vec<_> = fonts.collection.family_ids().collect();
+            fonts.collection.load_fonts_from_paths([path.as_str()]);
+            let mut added: Vec<_> = fonts.collection.family_ids()
+                .filter(|id| !known.contains(id)).collect();
+            // Collections can contain several faces/families. Sort that one
+            // file's new families by name while retaining caller path order.
+            added.sort_by_cached_key(|id| fonts.collection.family_name(*id).unwrap_or("").to_owned());
+            fallbacks.extend(added);
+        }
         let Some(family) = fonts.collection.family_id("Noto Sans") else {
             return Err("font family Noto Sans not found".into());
         };
-        fonts.collection.set_generic_families(parley::GenericFamily::SansSerif, std::iter::once(family));
+        fallbacks.retain(|id| *id != family);
+        fallbacks.insert(0, family);
+        fonts.collection.set_generic_families(parley::GenericFamily::SansSerif, fallbacks.into_iter());
         let (w, h) = (width as u16, height as u16);
         Ok(Renderer {
             width: w,

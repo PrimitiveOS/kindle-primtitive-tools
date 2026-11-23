@@ -201,8 +201,13 @@ impl Canvas {
     }
 
     pub fn measure(&mut self, content: &str, size: i32) -> i32 {
+        self.measure_with_weight(content, size, false)
+    }
+
+    /// Measure text at the same size and weight used by `text`.
+    pub fn measure_with_weight(&mut self, content: &str, size: i32, bold: bool) -> i32 {
         self.renderer
-            .text_width(content, self.px(size).max(1) as f32, false)
+            .text_width(content, self.px(size).max(1) as f32, bold)
             .ceil() as i32
     }
 
