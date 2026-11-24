@@ -104,8 +104,10 @@ pub trait App {
     }
 
     /// Draw the prepared layout into a canvas sized to the candidate.
-    fn draw_staged_viewport(&mut self, canvas: &mut Canvas) {
+    /// An error discards the candidate before the display sees it.
+    fn draw_staged_viewport(&mut self, canvas: &mut Canvas) -> io::Result<()> {
         self.draw(canvas);
+        Ok(())
     }
 
     /// Adopt a verified candidate or discard its staged state. Commit cannot

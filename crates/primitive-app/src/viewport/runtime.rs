@@ -222,7 +222,10 @@ impl Runtime {
             return Err(error);
         }
         staged.begin();
-        app.draw_staged_viewport(&mut staged);
+        if let Err(error) = app.draw_staged_viewport(&mut staged) {
+            app.finish_viewport(candidate, ViewportDecision::Abort);
+            return Err(error);
+        }
         let pixels = staged.finish(dark);
 
         self.invalidate();
@@ -314,6 +317,7 @@ mod tests {
         staged: Option<Viewport>,
         decisions: Vec<ViewportDecision>,
         fail_stage: bool,
+        fail_draw: bool,
         draws: Cell<usize>,
     }
 
@@ -333,7 +337,7 @@ mod tests {
                 Ok(())
             }
         }
-        fn draw_staged_viewport(&mut self, canvas: &mut Canvas) {
+        fn draw_staged_viewport(&mut self, canvas: &mut Canvas) -> io::Result<()> {
             assert_eq!(self.staged.unwrap().logical_size, size(canvas));
             let expected = (28.0 * f64::from(NATIVE_SIZE.0.min(NATIVE_SIZE.1)) / 1264.0).round();
             assert_eq!(canvas.px(28), expected as i32);
@@ -341,6 +345,10 @@ mod tests {
                 kl_core::Rect::new(canvas.bounds().w - 30, 4, 20, 10),
                 primitive_ui::BLACK,
             );
+            if self.fail_draw {
+                return Err(io::Error::other("staged draw failed"));
+            }
+            Ok(())
         }
         fn finish_viewport(&mut self, candidate: Viewport, decision: ViewportDecision) {
             assert_eq!(self.staged.take(), Some(candidate));
@@ -528,7 +536,7 @@ mod tests {
 
     #[test]
     #[ignore = "Supply the workspace Noto Sans fonts in KL_TEST_FONTS"]
-    fn staging_failure_aborts_without_touching_the_accepted_frame_or_input() {
+    fn staging_and_draw_failures_preserve_the_accepted_frame_and_input() {
         let fonts = fonts();
         let mut runtime = Runtime::default();
         let mut app = Fake::default();
@@ -556,6 +564,21 @@ mod tests {
             )
             .is_err());
         assert_eq!(app.accepted, Some(original));
+        assert!(runtime.resolve(button(original.generation)).is_some());
+        app.fail_stage = false;
+        app.fail_draw = true;
+        let result = runtime.transition(
+            &mut app,
+            &mut canvas,
+            LogicalTurn::Clockwise,
+            &fonts,
+            false,
+            |_, _, _| panic!("a failed staged draw must not expose pixels"),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "staged draw failed");
+        assert_eq!(app.decisions.last(), Some(&ViewportDecision::Abort));
+        assert_eq!(app.accepted, Some(original));
+        assert_eq!(size(&canvas), NATIVE_SIZE);
         assert!(runtime.resolve(button(original.generation)).is_some());
     }
 
