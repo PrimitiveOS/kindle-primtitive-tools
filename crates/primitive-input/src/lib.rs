@@ -15,6 +15,7 @@ use std::{
 };
 
 pub use kl_core::Input;
+use pan::{PanPhase, TouchPan};
 use primitive_device::{log, profile};
 use viewport::{NativeTouch, TouchPhase};
 

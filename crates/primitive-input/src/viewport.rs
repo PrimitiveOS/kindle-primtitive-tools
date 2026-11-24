@@ -7,6 +7,7 @@ use std::{
 
 use kl_core::viewport::LogicalTurn;
 
+use crate::pan::TouchPan;
 use crate::{
     gesture, page_button_for, read_buttons_with_clock, read_touches, Input, NATIVE_H, NATIVE_W,
 };

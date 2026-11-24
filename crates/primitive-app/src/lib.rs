@@ -61,6 +61,7 @@ pub mod viewport;
 use orientation::{Publisher as TurnPublisher, Turn};
 use viewport::runtime::Session as ViewportSession;
 
+pub use input::pan::{PanPhase, TouchPan};
 pub use kl_core::Rotation;
 pub use kl_kindle::{
     device as kindle_device, display, eink, input as kindle_input, profile as kindle_profile,
