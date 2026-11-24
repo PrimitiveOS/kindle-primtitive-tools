@@ -86,7 +86,7 @@ impl Session {
         let active = self.runtime.turn();
         let ready = self.runtime.is_ready();
         let may_attempt = self.retry_at.is_none() || self.retry_due();
-        let changing = active != Some(target);
+        let changing = self.runtime.needs_transition(app, target);
         if may_attempt && changing && (ready || active.is_none()) {
             let outcome = self.runtime.transition(
                 app,
@@ -153,6 +153,12 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    fn needs_transition(&self, app: &impl App, target: LogicalTurn) -> bool {
+        self.accepted.is_none_or(|accepted| {
+            accepted.turn != target || app.viewport_needs_stage(accepted)
+        })
+    }
+
     pub(crate) fn input_generation(&self) -> Arc<ViewportGeneration> {
         Arc::clone(&self.input)
     }
@@ -212,6 +218,7 @@ impl Runtime {
         dark: bool,
         mut present: impl FnMut(Viewport, Vec<u8>, bool) -> PresentResult,
     ) -> io::Result<()> {
+        let changes_turn = self.turn() != Some(turn);
         let candidate = self.candidate(turn);
         let (width, height) = candidate.logical_size;
         let mut staged =
@@ -229,7 +236,7 @@ impl Runtime {
         let pixels = staged.finish(dark);
 
         self.invalidate();
-        match checked(candidate, present(candidate, pixels, true)) {
+        match checked(candidate, present(candidate, pixels, changes_turn)) {
             Ok(ready) => {
                 app.finish_viewport(candidate, ViewportDecision::Commit);
                 *canvas = staged;
@@ -318,6 +325,7 @@ mod tests {
         decisions: Vec<ViewportDecision>,
         fail_stage: bool,
         fail_draw: bool,
+        needs_stage: bool,
         draws: Cell<usize>,
     }
 
@@ -328,6 +336,9 @@ mod tests {
         }
         fn input(&mut self, _input: Input) -> Change {
             Change::None
+        }
+        fn viewport_needs_stage(&self, _accepted: Viewport) -> bool {
+            self.needs_stage
         }
         fn stage_viewport(&mut self, candidate: Viewport) -> io::Result<()> {
             self.staged = Some(candidate);
@@ -355,6 +366,7 @@ mod tests {
             self.decisions.push(decision);
             if decision == ViewportDecision::Commit {
                 self.accepted = Some(candidate);
+                self.needs_stage = false;
             }
         }
     }
@@ -439,6 +451,29 @@ mod tests {
             runtime.resolve(event).unwrap().input,
             Input::Tap(NATIVE_SIZE.1 as f32 - 26., 11.)
         );
+
+        assert!(!runtime.needs_transition(&app, viewport.turn));
+        app.needs_stage = true;
+        assert!(runtime.needs_transition(&app, viewport.turn));
+        runtime
+            .transition(
+                &mut app,
+                &mut canvas,
+                viewport.turn,
+                &fonts,
+                false,
+                |view, pixels, full| {
+                    assert!(!full);
+                    assert_eq!(view.turn, viewport.turn);
+                    assert!(view.generation > viewport.generation);
+                    assert_eq!(pixels.len(), (NATIVE_SIZE.0 * NATIVE_SIZE.1) as usize);
+                    Ok(Some(accepted(view)))
+                },
+            )
+            .unwrap();
+        assert!(!runtime.needs_transition(&app, viewport.turn));
+        assert!(runtime.resolve(button(viewport.generation)).is_none());
+        assert!(runtime.resolve(button(app.accepted.unwrap().generation)).is_some());
     }
 
     #[test]

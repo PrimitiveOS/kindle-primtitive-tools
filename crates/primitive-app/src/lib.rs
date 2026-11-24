@@ -97,6 +97,11 @@ pub trait App {
         None
     }
 
+    /// A policy or document can require a verified frame at the same turn.
+    fn viewport_needs_stage(&self, _accepted: viewport::Viewport) -> bool {
+        false
+    }
+
     /// Prepare a renderable candidate while retaining the accepted layout.
     /// The kit calls `finish_viewport` even if staging reports an error.
     fn stage_viewport(&mut self, _candidate: viewport::Viewport) -> io::Result<()> {
