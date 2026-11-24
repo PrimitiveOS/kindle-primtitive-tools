@@ -81,6 +81,25 @@ pub struct ResolvedInput {
     pub touch_origin: Option<(f32, f32)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewportPan {
+    pub generation: u64,
+    pub native: TouchPan,
+}
+
+impl ViewportPan {
+    pub fn resolve(self, generation: &ViewportGeneration, turn: LogicalTurn) -> Option<TouchPan> {
+        (self.generation == generation.current())
+            .then(|| self.native.project(|point| screen_point(turn, point)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ViewportContact {
+    Gesture(ViewportEvent),
+    Pan(ViewportPan),
+}
+
 impl ViewportEvent {
     /// Resolve on the event loop using the visible viewport at dispatch time.
     /// A stale event is discarded before it can affect any hit region.
@@ -140,6 +159,33 @@ pub fn viewport_touch_loop(
     );
 }
 
+pub fn viewport_contact_loop(
+    path: String,
+    generation: &ViewportGeneration,
+    mut report: impl FnMut(ViewportContact),
+) {
+    use crate::{read_touch_stream, NativeContact};
+
+    read_touch_stream(
+        path,
+        || generation.current(),
+        || 0,
+        true,
+        |event, generation, _| {
+            let event = match event {
+                NativeContact::Gesture(touch) => ViewportContact::Gesture(ViewportEvent {
+                    generation,
+                    native: NativeInput::Touch(touch),
+                }),
+                NativeContact::Pan(native) => {
+                    ViewportContact::Pan(ViewportPan { generation, native })
+                }
+            };
+            report(event);
+        },
+    );
+}
+
 pub fn viewport_button_loop(
     path: String,
     generation: &ViewportGeneration,
@@ -181,6 +227,49 @@ mod tests {
     use crate::{Contact, KEY_PAGEDOWN, KEY_PAGEUP};
     use kl_core::{viewport::ViewportTransform, Layout, Screen, Ui};
     use std::time::Instant;
+
+    #[test]
+    fn live_contact_origin_and_release_share_the_visible_turn_and_generation() {
+        let generation = ViewportGeneration::default();
+        let right = NATIVE_W as f32 - 1.0;
+        let bottom = NATIVE_H as f32 - 1.0;
+        let start = (200.0, 500.0);
+        let end = (260.0, 640.0);
+        for (turn, start, end) in [
+            (LogicalTurn::Upright, start, end),
+            (
+                LogicalTurn::Clockwise,
+                (bottom - 500.0, 200.0),
+                (bottom - 640.0, 260.0),
+            ),
+            (
+                LogicalTurn::UpsideDown,
+                (right - 200.0, bottom - 500.0),
+                (right - 260.0, bottom - 640.0),
+            ),
+            (
+                LogicalTurn::Counterclockwise,
+                (500.0, right - 200.0),
+                (640.0, right - 260.0),
+            ),
+        ] {
+            let event = ViewportPan {
+                generation: generation.current(),
+                native: TouchPan {
+                    start: (200.0, 500.0),
+                    end: (260.0, 640.0),
+                    elapsed: Duration::from_millis(600),
+                    phase: crate::pan::PanPhase::Release,
+                },
+            };
+            let pan = event.resolve(&generation, turn).unwrap();
+            assert_eq!((pan.start, pan.end), (start, end));
+            assert_eq!(pan.elapsed, event.native.elapsed);
+            assert_eq!(pan.phase, event.native.phase);
+            generation.advance();
+            assert!(event.resolve(&generation, turn).is_none());
+        }
+    }
 
     #[test]
     fn native_swipes_open_the_visible_top_edge_in_every_turn() {

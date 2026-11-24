@@ -6,7 +6,10 @@ use std::{
 };
 
 use kl_core::viewport::ViewportTransform;
-use primitive_input::viewport::{NativeInput, ResolvedInput, ViewportEvent, ViewportGeneration};
+use primitive_input::pan::TouchPan;
+use primitive_input::viewport::{
+    NativeInput, ResolvedInput, ViewportEvent, ViewportGeneration, ViewportPan,
+};
 
 use super::{
     FramebufferGeometry, LogicalTurn, ReadyViewport, Viewport, ViewportDecision, ViewportPublisher,
@@ -59,6 +62,21 @@ impl Session {
         }
         let was_ready = self.runtime.is_ready();
         let resolved = self.runtime.resolve_verified(input, framebuffer);
+        if was_ready && !self.runtime.is_ready() {
+            self.retry_at = None;
+        }
+        resolved
+    }
+
+    pub(crate) fn resolve_pan(
+        &mut self,
+        input: ViewportPan,
+        display: &Display,
+    ) -> Option<TouchPan> {
+        let was_ready = self.runtime.is_ready();
+        let resolved = self
+            .runtime
+            .resolve_pan(input, || display.viewport_framebuffer());
         if was_ready && !self.runtime.is_ready() {
             self.retry_at = None;
         }
@@ -196,7 +214,27 @@ impl Runtime {
         input: ViewportEvent,
         readback: impl FnOnce() -> Option<FramebufferGeometry>,
     ) -> Option<ResolvedInput> {
-        let resolved = self.resolve(input)?;
+        self.verify_input(self.resolve(input), readback)
+    }
+
+    fn resolve_pan(
+        &mut self,
+        input: ViewportPan,
+        readback: impl FnOnce() -> Option<FramebufferGeometry>,
+    ) -> Option<TouchPan> {
+        let ready = self.ready.as_ref()?;
+        if ready.viewport.generation != self.input.current() {
+            return None;
+        }
+        self.verify_input(input.resolve(&self.input, ready.viewport.turn), readback)
+    }
+
+    fn verify_input<T>(
+        &mut self,
+        resolved: Option<T>,
+        readback: impl FnOnce() -> Option<FramebufferGeometry>,
+    ) -> Option<T> {
+        let resolved = resolved?;
         let expected = self.ready.as_ref().map(|ready| ready.framebuffer);
         if readback() != expected {
             self.invalidate();

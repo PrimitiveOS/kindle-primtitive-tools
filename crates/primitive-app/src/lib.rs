@@ -42,7 +42,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{
+    mpsc::{self, RecvTimeoutError},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -83,6 +86,21 @@ pub trait App {
     /// A swipe with its horizontal start in screen coordinates.
     fn swipe(&mut self, input: Input, _start_x: f32) -> Change {
         self.input(input)
+    }
+
+    /// Opt in to movement samples for an ordinary contact. Selection holds keep their own events.
+    fn live_touch_pan(&self) -> bool {
+        false
+    }
+
+    /// The release is delivered through this channel for a contact that started a pan.
+    /// Forward it here to preserve the app's ordinary swipe behavior.
+    fn touch_pan(&mut self, pan: TouchPan) -> Change {
+        if pan.phase == PanPhase::Release {
+            self.swipe(pan.swipe(), pan.start.0)
+        } else {
+            Change::None
+        }
     }
 
     /// Temporarily override the native portrait turn. `None` follows Launcher settings.
@@ -226,6 +244,22 @@ impl Lifecycle {
         on_save_error: impl FnOnce(io::Error),
     ) -> Change {
         self.dispatch_input(app, input, Some(start_x), on_save_error)
+    }
+
+    pub fn pan(
+        &mut self,
+        app: &mut impl App,
+        pan: TouchPan,
+        on_save_error: impl FnOnce(io::Error),
+    ) -> Change {
+        if self.usb_drive || !self.is_awake() {
+            return Change::None;
+        }
+        let change = app.touch_pan(pan);
+        if change == Change::Exit && !self.finish(app, on_save_error) {
+            return Change::None;
+        }
+        change
     }
 
     fn dispatch_input(
@@ -406,6 +440,9 @@ fn follow_redraw_signal(events: mpsc::Sender<Event>) {
 enum Event {
     Input(Input, Option<f32>),
     ViewportInput(input::viewport::ViewportEvent, Option<u64>),
+    Pan(TouchPan),
+    LegacyPan(u64, TouchPan),
+    ViewportPan(input::viewport::ViewportPan),
     Turn(Rotation),
     StorageChanged,
     UsbRedraw,
@@ -517,13 +554,39 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         publish_legacy_rotation(&run, settings.rotation);
     }
     let (tx, rx) = mpsc::channel();
+    let live_pan = app.live_touch_pan();
+    let legacy_pan_generation = (live_pan && viewport.is_none())
+        .then(|| Arc::new(input::viewport::ViewportGeneration::default()));
     if let Some(path) = input::find(profile::ACTIVE.touch_name) {
         let events = tx.clone();
         let generation = viewport.as_ref().map(ViewportSession::input_generation);
+        let legacy_pan_generation = legacy_pan_generation.clone();
         thread::spawn(move || {
             if let Some(generation) = generation {
-                input::viewport::viewport_touch_loop(path, &generation, |event| {
-                    let _ = events.send(Event::ViewportInput(event, None));
+                if live_pan {
+                    use input::viewport::ViewportContact;
+                    input::viewport::viewport_contact_loop(path, &generation, |event| {
+                        let event = match event {
+                            ViewportContact::Gesture(gesture) => {
+                                Event::ViewportInput(gesture, None)
+                            }
+                            ViewportContact::Pan(pan) => Event::ViewportPan(pan),
+                        };
+                        let _ = events.send(event);
+                    });
+                } else {
+                    input::viewport::viewport_touch_loop(path, &generation, |event| {
+                        let _ = events.send(Event::ViewportInput(event, None));
+                    });
+                }
+            } else if let Some(generation) = legacy_pan_generation {
+                use input::pan::ContactEvent;
+                input::pan::legacy_contact_loop(path, &generation, |generation, event| {
+                    let event = match event {
+                        ContactEvent::Gesture(input, x) => Event::Input(input, Some(x)),
+                        ContactEvent::Pan(pan) => Event::LegacyPan(generation, pan),
+                    };
+                    let _ = events.send(event);
                 });
             } else {
                 input::touch_loop_with_origin(path, |input, start_x| {
@@ -649,6 +712,8 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         if usb_changed {
             if let Some(viewport) = &mut viewport {
                 viewport.invalidate();
+            } else if let Some(generation) = &legacy_pan_generation {
+                generation.advance();
             }
         }
         let usb_redraw = matches!(event, Ok(Event::UsbRedraw));
@@ -659,6 +724,14 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
                 .map_or(Event::Redraw, |resolved| {
                     Event::Input(resolved.input, resolved.touch_origin.map(|(x, _)| x))
                 }),
+            Event::ViewportPan(raw) => viewport
+                .as_mut()
+                .and_then(|viewport| viewport.resolve_pan(raw, &display))
+                .map_or(Event::Redraw, Event::Pan),
+            Event::LegacyPan(generation, pan) => legacy_pan_generation
+                .as_ref()
+                .filter(|current| current.current() == generation)
+                .map_or(Event::Redraw, |_| Event::Pan(pan)),
             event => event,
         });
         let was_awake = lifecycle.is_awake();
@@ -674,6 +747,12 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             }
             // The swipe down from the top edge is the system's (quick settings) under the launcher, not the app's.
             Ok(Event::Input(input, _)) if under_launcher && is_system_swipe(input) => Change::None,
+            Ok(Event::Pan(mut pan)) => {
+                if under_launcher && is_system_swipe(pan.swipe()) {
+                    pan.phase = PanPhase::Cancel;
+                }
+                lifecycle.pan(&mut app, pan, on_save_error)
+            }
             Ok(Event::Input(input, start_x)) => {
                 let mut feedback_ok = true;
                 if !usb_changed && (viewport.is_some() || !turn_publisher.needs_frame(turn)) {
@@ -716,6 +795,8 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         if was_awake && !lifecycle.is_awake() {
             if let Some(viewport) = &mut viewport {
                 viewport.invalidate();
+            } else if let Some(generation) = &legacy_pan_generation {
+                generation.advance();
             }
         }
         if usb_changed && !usb_drive {
@@ -729,6 +810,9 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             turn = Turn::resolve(app.preferred_rotation(), inherited_rotation);
             let old_rotation = settings.rotation;
             if turn.rotation != old_rotation {
+                if let Some(generation) = &legacy_pan_generation {
+                    generation.advance();
+                }
                 settings.rotation = turn.rotation;
                 if !turn_publisher.scoped() {
                     publish_legacy_rotation(&run, turn.rotation);
@@ -966,6 +1050,33 @@ mod tests {
         );
         assert!(!lifecycle.is_awake());
         assert_eq!(errors[0].to_string(), "disk full");
+    }
+
+    #[test]
+    fn opt_in_pan_leaves_legacy_app_methods_and_lifecycle_intact() {
+        let mut demo = Demo::default();
+        let mut lifecycle = Lifecycle::default();
+        let on_error = |error| panic!("unexpected save failure: {error}");
+        let pan = TouchPan {
+            start: (800.0, 600.0),
+            end: (800.0, 400.0),
+            elapsed: Duration::ZERO,
+            phase: PanPhase::Move,
+        };
+        let release = TouchPan {
+            phase: PanPhase::Release,
+            ..pan
+        };
+        assert!(!demo.live_touch_pan());
+        assert_eq!(lifecycle.pan(&mut demo, pan, on_error), Change::None);
+        assert_eq!(lifecycle.pan(&mut demo, release, on_error), Change::Partial);
+        assert_eq!(demo.inputs, [release.swipe()]);
+        lifecycle.input(&mut demo, Input::Sleep, on_error);
+        assert_eq!(lifecycle.pan(&mut demo, release, on_error), Change::None);
+        lifecycle.input(&mut demo, Input::Wake, on_error);
+        lifecycle.set_usb_drive(true);
+        assert_eq!(lifecycle.pan(&mut demo, release, on_error), Change::None);
+        assert_eq!(demo.inputs, [release.swipe(), Input::Sleep, Input::Wake]);
     }
 
     #[test]

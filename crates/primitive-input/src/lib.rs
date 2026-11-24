@@ -3,6 +3,7 @@
 //! coordinates, already turned for the launcher's rotation. Viewport-aware callers can
 //! opt into native coordinates and generation-tagged events.
 
+pub mod pan;
 pub mod viewport;
 
 use std::{
@@ -35,6 +36,7 @@ const KEY_PAGEDOWN: u16 = profile::ACTIVE.page_forward_key;
 const HOLD_START: Duration = Duration::from_millis(800);
 const HOLD_PAN_INTERVAL: Duration = Duration::from_millis(200);
 const HOLD_PAN_MIN_DISTANCE: f32 = 6.0;
+const PAN_START_DISTANCE: f32 = 40.0;
 
 /// Turn a point from the panel's native (upright) frame into the screen's frame.
 pub fn turn_point(turn: u32, x: f32, y: f32) -> (f32, f32) {
@@ -144,7 +146,7 @@ fn is_hold_threshold_reached(duration: Duration) -> bool {
 /// The gesture for a finished touch: from its start and end points and how long it was held.
 pub fn gesture(start: (f32, f32), end: (f32, f32), held: Duration) -> Input {
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
-    let still = dx.abs() < 40.0 && dy.abs() < 40.0;
+    let still = dx.abs() < PAN_START_DISTANCE && dy.abs() < PAN_START_DISTANCE;
     if still && held < Duration::from_millis(800) {
         Input::Tap(start.0, start.1)
     } else if still {
@@ -210,6 +212,13 @@ struct Contact<Generation> {
     hold_started: bool,
     last_pan: (f32, f32),
     last_pan_at: Instant,
+    stream_pan: bool,
+    pan_started_at: Option<Instant>,
+}
+
+enum NativeContact {
+    Gesture(NativeTouch),
+    Pan(TouchPan),
 }
 
 impl<Generation: Copy> Contact<Generation> {
@@ -222,11 +231,13 @@ impl<Generation: Copy> Contact<Generation> {
             hold_started: false,
             last_pan: (0.0, 0.0),
             last_pan_at: pressed_at,
+            stream_pan: false,
+            pan_started_at: None,
         }
     }
 
     fn timeout(&self, now: Instant) -> Option<Duration> {
-        (self.first.is_some() && !self.hold_started)
+        (self.first.is_some() && !self.hold_started && self.pan_started_at.is_none())
             .then(|| HOLD_START.saturating_sub(now.duration_since(self.pressed_at)))
     }
 
@@ -252,7 +263,7 @@ impl<Generation: Copy> Contact<Generation> {
     }
 
     fn idle(&mut self, now: Instant, report: &mut impl FnMut(NativeTouch, Generation, u32)) {
-        if !self.hold_started && self.first.is_some() {
+        if !self.hold_started && self.first.is_some() && self.pan_started_at.is_none() {
             self.emit(TouchPhase::HoldStart, report);
             self.hold_started = true;
             self.last_pan = self.last_in_legacy_view();
@@ -280,6 +291,44 @@ impl<Generation: Copy> Contact<Generation> {
         }
     }
 
+    fn pan_event(&self, now: Instant, phase: PanPhase) -> Option<(TouchPan, u32)> {
+        let (start, turn) = self.first?;
+        Some((
+            TouchPan {
+                start,
+                end: self.last,
+                elapsed: now.duration_since(self.pan_started_at?),
+                phase,
+            },
+            turn,
+        ))
+    }
+
+    fn sample_pan(&mut self, now: Instant) -> Option<(TouchPan, u32)> {
+        if !self.stream_pan || self.hold_started {
+            return None;
+        }
+        if self.pan_started_at.is_none() {
+            let (start, _) = self.first?;
+            if now.duration_since(self.pressed_at) >= HOLD_START
+                || (self.last.0 - start.0)
+                    .abs()
+                    .max((self.last.1 - start.1).abs())
+                    < PAN_START_DISTANCE
+            {
+                return None;
+            }
+            self.pan_started_at = Some(now);
+        } else if !self.moved_since_last_pan(HOLD_PAN_MIN_DISTANCE)
+            || now.duration_since(self.last_pan_at) < HOLD_PAN_INTERVAL
+        {
+            return None;
+        }
+        self.last_pan = self.last_in_legacy_view();
+        self.last_pan_at = now;
+        self.pan_event(now, PanPhase::Move)
+    }
+
     fn finish(self, now: Instant, report: &mut impl FnMut(NativeTouch, Generation, u32)) {
         let held = now.duration_since(self.pressed_at);
         if self.hold_started || is_hold_threshold_reached(held) {
@@ -303,9 +352,29 @@ impl<Generation: Copy> Contact<Generation> {
 
 fn read_touches<Generation: Copy>(
     path: String,
+    on_press: impl FnMut() -> Generation,
+    first_turn: impl FnMut() -> u32,
+    mut report: impl FnMut(NativeTouch, Generation, u32),
+) {
+    read_touch_stream(
+        path,
+        on_press,
+        first_turn,
+        false,
+        |event, generation, turn| {
+            if let NativeContact::Gesture(touch) = event {
+                report(touch, generation, turn);
+            }
+        },
+    );
+}
+
+fn read_touch_stream<Generation: Copy>(
+    path: String,
     mut on_press: impl FnMut() -> Generation,
     mut first_turn: impl FnMut() -> u32,
-    mut report: impl FnMut(NativeTouch, Generation, u32),
+    stream_pan: bool,
+    mut report: impl FnMut(NativeContact, Generation, u32),
 ) {
     let mut file = match File::open(&path) {
         Ok(f) => f,
@@ -334,7 +403,9 @@ fn read_touches<Generation: Copy>(
         };
         if !ready {
             if let Some(touch) = contact.as_mut() {
-                touch.idle(Instant::now(), &mut report);
+                touch.idle(Instant::now(), &mut |touch, generation, turn| {
+                    report(NativeContact::Gesture(touch), generation, turn);
+                });
             }
             continue;
         }
@@ -343,11 +414,27 @@ fn read_touches<Generation: Copy>(
         };
         match (ev.kind, ev.code) {
             (EV_ABS, ABS_MT_TRACKING_ID) if ev.value >= 0 => {
-                contact = Some(Contact::new(Instant::now(), on_press()));
+                let now = Instant::now();
+                if let Some((pan, generation, turn)) = contact.as_ref().and_then(|previous| {
+                    let (pan, turn) = previous.pan_event(now, PanPhase::Cancel)?;
+                    Some((pan, previous.generation, turn))
+                }) {
+                    report(NativeContact::Pan(pan), generation, turn);
+                }
+                let mut touch = Contact::new(now, on_press());
+                touch.stream_pan = stream_pan;
+                contact = Some(touch);
             }
             (EV_ABS, ABS_MT_TRACKING_ID) => {
                 if let Some(touch) = contact.take() {
-                    touch.finish(Instant::now(), &mut report);
+                    let now = Instant::now();
+                    if let Some((pan, turn)) = touch.pan_event(now, PanPhase::Release) {
+                        report(NativeContact::Pan(pan), touch.generation, turn);
+                    } else {
+                        touch.finish(now, &mut |touch, generation, turn| {
+                            report(NativeContact::Gesture(touch), generation, turn);
+                        });
+                    }
                 }
             }
             (EV_ABS, ABS_MT_POSITION_X) => raw_x = ev.value,
@@ -355,7 +442,18 @@ fn read_touches<Generation: Copy>(
             (EV_SYN, SYN_REPORT) => {
                 if let Some(touch) = contact.as_mut() {
                     let point = (scale(raw_x, &xi, NATIVE_W), scale(raw_y, &yi, NATIVE_H));
-                    touch.sample(point, Instant::now(), &mut first_turn, &mut report);
+                    let now = Instant::now();
+                    touch.sample(
+                        point,
+                        now,
+                        &mut first_turn,
+                        &mut |touch, generation, turn| {
+                            report(NativeContact::Gesture(touch), generation, turn);
+                        },
+                    );
+                    if let Some((pan, turn)) = touch.sample_pan(now) {
+                        report(NativeContact::Pan(pan), touch.generation, turn);
+                    }
                 }
             }
             _ => {}
@@ -492,4 +590,56 @@ mod tests {
         assert_eq!(HOLD_PAN_INTERVAL, Duration::from_millis(200));
         assert_eq!(HOLD_PAN_MIN_DISTANCE, 6.0);
     }
+}
+#[test]
+fn live_pan_starts_on_movement_keeps_an_eink_pace_and_releases_after_the_hold_deadline() {
+    let beginning = Instant::now();
+    let at = |milliseconds| beginning + Duration::from_millis(milliseconds);
+    let mut contact = Contact::new(beginning, ());
+    contact.stream_pan = true;
+    let mut reports = Vec::new();
+    let mut report = |touch: NativeTouch, (), _| reports.push(touch.phase);
+    contact.sample((500.0, 600.0), at(0), || 0, &mut report);
+    contact.sample((500.0, 580.0), at(20), || 0, &mut report);
+    assert!(contact.sample_pan(at(20)).is_none());
+    contact.sample((500.0, 550.0), at(40), || 0, &mut report);
+    let (first, _) = contact.sample_pan(at(40)).unwrap();
+    assert_eq!(first.start, (500.0, 600.0));
+    assert_eq!(first.end, (500.0, 550.0));
+    assert_eq!(first.elapsed, Duration::ZERO);
+    assert_eq!(first.phase, PanPhase::Move);
+    assert_eq!(contact.timeout(at(100)), None);
+    contact.sample((500.0, 480.0), at(200), || 0, &mut report);
+    assert!(contact.sample_pan(at(200)).is_none());
+    contact.sample((500.0, 460.0), at(245), || 0, &mut report);
+    assert_eq!(contact.sample_pan(at(245)).unwrap().0.end.1, 460.0);
+    contact.idle(at(900), &mut report);
+    let (release, _) = contact.pan_event(at(950), PanPhase::Release).unwrap();
+    assert_eq!(release.elapsed, Duration::from_millis(910));
+    assert_eq!(release.phase, PanPhase::Release);
+    assert!(reports.is_empty());
+}
+
+#[test]
+fn a_stationary_hold_keeps_selection_events_even_with_live_pan_enabled() {
+    let beginning = Instant::now();
+    let at = |milliseconds| beginning + Duration::from_millis(milliseconds);
+    let mut contact = Contact::new(beginning, ());
+    contact.stream_pan = true;
+    let mut reports = Vec::new();
+    let mut report = |touch: NativeTouch, (), _| reports.push(touch.phase);
+    contact.sample((500.0, 600.0), at(0), || 0, &mut report);
+    contact.idle(at(800), &mut report);
+    contact.sample((600.0, 600.0), at(1010), || 0, &mut report);
+    assert!(contact.sample_pan(at(1010)).is_none());
+    assert!(contact.pan_event(at(1120), PanPhase::Release).is_none());
+    contact.finish(at(1120), &mut report);
+    assert_eq!(
+        reports,
+        [
+            TouchPhase::HoldStart,
+            TouchPhase::HoldPan,
+            TouchPhase::HoldRelease { held_ms: 1120 }
+        ]
+    );
 }
