@@ -116,13 +116,116 @@ pub struct LocalTime {
     pub utc_offset: Option<i32>,
 }
 
-/// Read a timestamp in the Kindle's configured time zone. Its TZif file can
-/// have an empty footer, which musl interprets as UTC after the last transition.
+/// A time-zone snapshot for one operation. Use this when converting many
+/// timestamps so history and calendar aggregation do not reopen the zone file
+/// for every visit.
+pub struct DeviceTimeZone {
+    zone: Option<kl_core::tz::Zone>,
+}
+
+impl DeviceTimeZone {
+    pub fn load() -> Self {
+        Self {
+            zone: std::fs::read("/etc/localtime")
+                .ok()
+                .and_then(|data| kl_core::tz::Zone::from_tzif(&data)),
+        }
+    }
+
+    pub fn local_time_at(&self, unix_seconds: i64) -> Option<LocalTime> {
+        let offset = self.zone.as_ref().map(|zone| zone.offset_at(unix_seconds));
+        civil_time_at(unix_seconds, offset)
+    }
+
+    pub fn resolve_local_time(&self, local_seconds_as_utc: i64) -> Option<i64> {
+        self.resolve(local_seconds_as_utc, None, false)
+    }
+
+    pub fn resolve_local_boundary(&self, local_seconds_as_utc: i64) -> Option<i64> {
+        self.resolve(local_seconds_as_utc, None, true)
+    }
+
+    pub fn resolve_local_time_after(&self, local_seconds_as_utc: i64, after_utc: i64) -> Option<i64> {
+        self.resolve(local_seconds_as_utc, Some(after_utc), true)
+    }
+
+    fn resolve(&self, civil: i64, after: Option<i64>, advance_gap: bool) -> Option<i64> {
+        match &self.zone {
+            Some(zone) => zone.resolve_local(civil, after, advance_gap),
+            None => system_resolve_local(civil, after, advance_gap),
+        }
+    }
+}
+
+/// Read a timestamp in the configured time zone. The Kindle's TZif file
+/// can have an empty footer, which musl interprets as UTC after its last
+/// transition.
 pub fn local_time_at(unix_seconds: i64) -> Option<LocalTime> {
-    let offset = std::fs::read("/etc/localtime")
-        .ok()
-        .and_then(|data| kl_core::tz::offset_at(&data, unix_seconds));
-    civil_time_at(unix_seconds, offset)
+    DeviceTimeZone::load().local_time_at(unix_seconds)
+}
+
+/// Resolve an exact local wall time represented as seconds as if it were UTC.
+/// In a repeated hour use the earlier instant. Reject skipped wall times.
+pub fn resolve_local_time(local_seconds_as_utc: i64) -> Option<i64> {
+    DeviceTimeZone::load().resolve_local_time(local_seconds_as_utc)
+}
+
+/// Resolve a local boundary, moving through a gap by the transition length.
+pub fn resolve_local_boundary(local_seconds_as_utc: i64) -> Option<i64> {
+    DeviceTimeZone::load().resolve_local_boundary(local_seconds_as_utc)
+}
+
+/// Resolve the next occurrence of today's wall time after an instant. Either
+/// copy of a repeated hour can be used. Move a gap forward when necessary.
+pub fn resolve_local_time_after(local_seconds_as_utc: i64, after_utc: i64) -> Option<i64> {
+    DeviceTimeZone::load().resolve_local_time_after(local_seconds_as_utc, after_utc)
+}
+
+#[allow(clippy::useless_conversion)] // time_t is narrower on some supported targets.
+fn system_resolve_local(civil: i64, after: Option<i64>, advance_gap: bool) -> Option<i64> {
+    let civil_time = libc::time_t::try_from(civil).ok()?;
+    let mut requested = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: gmtime_r initializes the caller's buffer on success.
+    let requested = unsafe {
+        if libc::gmtime_r(&civil_time, requested.as_mut_ptr()).is_null() {
+            return None;
+        }
+        requested.assume_init()
+    };
+
+    let mut had_exact = false;
+    let mut exact: Option<i64> = None;
+    let mut forward: Option<(i64, i64)> = None;
+    for hint in [-1, 0, 1] {
+        let mut local = requested;
+        local.tm_isdst = hint;
+        // SAFETY: mktime and timegm use the caller's initialized tm. The
+        // former normalizes local, so it can be read back as civil seconds.
+        let instant = unsafe { libc::mktime(&mut local) };
+        let mut round_trip = std::mem::MaybeUninit::<libc::tm>::uninit();
+        let projected = unsafe {
+            if libc::localtime_r(&instant, round_trip.as_mut_ptr()).is_null() {
+                continue;
+            }
+            let mut round_trip = round_trip.assume_init();
+            libc::timegm(&mut round_trip)
+        };
+        let instant = i64::from(instant);
+        let projected = i64::from(projected);
+        had_exact |= projected == civil;
+        if after.is_some_and(|limit| instant <= limit) {
+            continue;
+        }
+        if projected == civil {
+            exact = Some(exact.map_or(instant, |old| old.min(instant)));
+        } else if advance_gap
+            && projected.checked_sub(civil).is_some_and(|delta| (1..=183_598).contains(&delta))
+        {
+            let candidate = (projected, instant);
+            forward = Some(forward.map_or(candidate, |old| old.min(candidate)));
+        }
+    }
+    if had_exact { exact } else { forward.map(|(_, instant)| instant) }
 }
 
 #[allow(clippy::useless_conversion)] // time_t is narrower on some supported targets.
