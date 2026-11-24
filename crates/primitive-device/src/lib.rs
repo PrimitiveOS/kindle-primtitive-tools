@@ -103,36 +103,84 @@ struct ClockReading {
     utc_offset: Option<i32>,
 }
 
+/// Civil time reported by the device for a Unix timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalTime {
+    pub year: i32,
+    pub month: i32,
+    pub day: i32,
+    pub hour: i32,
+    pub minute: i32,
+    pub second: i32,
+    pub weekday: i32,
+    pub utc_offset: Option<i32>,
+}
+
+/// Read a timestamp in the Kindle's configured time zone. Its TZif file can
+/// have an empty footer, which musl interprets as UTC after the last transition.
+pub fn local_time_at(unix_seconds: i64) -> Option<LocalTime> {
+    let offset = std::fs::read("/etc/localtime")
+        .ok()
+        .and_then(|data| kl_core::tz::offset_at(&data, unix_seconds));
+    civil_time_at(unix_seconds, offset)
+}
+
+#[allow(clippy::useless_conversion)] // time_t is narrower on some supported targets.
+fn civil_time_at(unix_seconds: i64, offset: Option<i32>) -> Option<LocalTime> {
+    let shifted = unix_seconds.checked_add(i64::from(offset.unwrap_or(0)))?;
+    let seconds = libc::time_t::try_from(shifted).ok()?;
+    let mut result = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: both functions initialize result on success.
+    let tm = unsafe {
+        let written = if offset.is_some() {
+            libc::gmtime_r(&seconds, result.as_mut_ptr())
+        } else {
+            libc::localtime_r(&seconds, result.as_mut_ptr())
+        };
+        if written.is_null() {
+            return None;
+        }
+        result.assume_init()
+    };
+    Some(LocalTime {
+        year: tm.tm_year.checked_add(1900)?,
+        month: tm.tm_mon + 1,
+        day: tm.tm_mday,
+        hour: tm.tm_hour,
+        minute: tm.tm_min,
+        second: tm.tm_sec,
+        weekday: tm.tm_wday,
+        utc_offset: offset,
+    })
+}
+
 fn read_clock() -> ClockReading {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    // SAFETY: `time`, `gmtime_r` and `localtime_r` only write into the values passed here.
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        // The zone offset comes from /etc/localtime directly: musl reads the Kindle's file as UTC
-        // (kl_core::tz). localtime_r is the fallback for a file that cannot be read.
-        let offset = std::fs::read("/etc/localtime").ok().and_then(|d| kl_core::tz::offset_at(&d, now as i64));
-        let done = match offset {
-            Some(off) => {
-                let shifted = now.saturating_add(off as _);
-                !libc::gmtime_r(&shifted, &mut tm).is_null()
-            }
-            None => !libc::localtime_r(&now, &mut tm).is_null(),
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .and_then(local_time_at);
+    let Some(time) = time else {
+        return ClockReading {
+            time: "--:--".into(),
+            date: String::new(),
+            minute: -1,
+            year: None,
+            utc_offset: None,
         };
-        if !done {
-            return ClockReading { time: "--:--".into(), date: String::new(), minute: -1, year: None, utc_offset: None };
-        }
-        let clock = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
-        let day = DAYS.get(tm.tm_wday as usize).copied().unwrap_or("");
-        let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("");
-        ClockReading {
-            time: clock,
-            date: format!("{day} {} {month}", tm.tm_mday),
-            minute: tm.tm_hour * 60 + tm.tm_min,
-            year: tm.tm_year.checked_add(1900),
-            utc_offset: offset,
-        }
+    };
+    let weekday = DAYS.get(time.weekday as usize).copied().unwrap_or("");
+    let month = MONTHS.get((time.month - 1) as usize).copied().unwrap_or("");
+    ClockReading {
+        time: format!("{:02}:{:02}", time.hour, time.minute),
+        date: format!("{weekday} {} {month}", time.day),
+        minute: time.hour * 60 + time.minute,
+        year: Some(time.year),
+        utc_offset: time.utc_offset,
     }
 }
 
@@ -794,6 +842,19 @@ pub fn power_loop(mut report: impl FnMut(Input)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn civil_clock_keeps_the_device_zone_across_midnight() {
+        let east = civil_time_at(22 * 3600 + 59, Some(7 * 3600)).unwrap();
+        assert_eq!((east.year, east.month, east.day, east.weekday), (1970, 1, 2, 5));
+        assert_eq!((east.hour, east.minute, east.second), (5, 0, 59));
+        assert_eq!(east.utc_offset, Some(7 * 3600));
+
+        let west = civil_time_at(0, Some(-3 * 3600 - 30 * 60)).unwrap();
+        assert_eq!((west.year, west.month, west.day, west.weekday), (1969, 12, 31, 3));
+        assert_eq!((west.hour, west.minute, west.second), (20, 30, 0));
+        assert!(civil_time_at(i64::MAX, Some(3600)).is_none());
+    }
 
     #[test]
     fn battery_state_distinguishes_missing_and_idle_charger_readings() {
