@@ -17,7 +17,10 @@ use kl_core::{
     wallpaper::{WallpaperChoice, WallpaperDraft, WallpaperTarget},
     App, IconSource, Launch, Layout, Rotation, Screen, Status, Ui,
 };
-use parley::{FontContext, FontWeight, LayoutContext, PositionedLayoutItem, StyleProperty};
+use parley::{
+    FontContext, FontFamily, FontFamilyName, FontWeight, LayoutContext, PositionedLayoutItem,
+    StyleProperty, fontique::FontInfoOverride,
+};
 use vello_cpu::{
     kurbo::{self, Affine, Shape},
     peniko::Color,
@@ -84,12 +87,19 @@ struct Text<'a> {
     gray: u8,
 }
 
+#[derive(Default)]
+struct FontStyle<'a> {
+    emphasis: Option<std::ops::Range<usize>>,
+    family: Option<&'a str>,
+}
+
 pub struct Renderer {
     width: u16,
     ctx: RenderContext,
     resources: Resources,
     pixmap: Pixmap,
     fonts: FontContext,
+    font_file_families: HashMap<String, Option<String>>,
     layout_cx: LayoutContext<()>,
     large_text: bool,
     high_contrast: bool,
@@ -215,6 +225,7 @@ impl Renderer {
             resources: Resources::new(),
             pixmap: Pixmap::new(w, h),
             fonts,
+            font_file_families: HashMap::new(),
             layout_cx: LayoutContext::new(),
             large_text: false,
             high_contrast: false,
@@ -396,24 +407,27 @@ impl Renderer {
     }
 
     fn text_with_wrap(&mut self, t: Text, overflow: parley::OverflowWrap) -> f32 {
-        self.text_with_emphasis(t, overflow, None)
+        self.text_with_style(t, overflow, FontStyle::default())
     }
 
-    fn text_with_emphasis(
+    fn text_with_style(
         &mut self,
         t: Text,
         overflow: parley::OverflowWrap,
-        emphasis: Option<std::ops::Range<usize>>,
+        style: FontStyle<'_>,
     ) -> f32 {
         let mut content = t.text.to_string();
         let mut source_end = content.len();
         // Shorten until it fits in `lines` lines.
         loop {
-            let visible_emphasis = emphasis.as_ref().and_then(|range| {
+            let visible_emphasis = style.emphasis.as_ref().and_then(|range| {
                 let end = range.end.min(source_end);
                 (range.start < end).then_some(range.start..end)
             });
-            let layout = self.layout_with_emphasis(&content, t.size, t.bold, t.w, overflow, visible_emphasis);
+            let layout = self.layout_with_style(
+                &content, t.size, t.bold, t.w, overflow,
+                FontStyle { emphasis: visible_emphasis, family: style.family },
+            );
             let count = layout.lines().count();
             if count <= t.lines || content.chars().count() <= 1 {
                 return self.draw_layout(&layout, &t);
@@ -434,17 +448,17 @@ impl Renderer {
     }
 
     fn layout_with_wrap(&mut self, text: &str, size: f32, bold: bool, w: f32, overflow: parley::OverflowWrap) -> parley::Layout<()> {
-        self.layout_with_emphasis(text, size, bold, w, overflow, None)
+        self.layout_with_style(text, size, bold, w, overflow, FontStyle::default())
     }
 
-    fn layout_with_emphasis(
+    fn layout_with_style(
         &mut self,
         text: &str,
         size: f32,
         bold: bool,
         width: f32,
         overflow: parley::OverflowWrap,
-        emphasis: Option<std::ops::Range<usize>>,
+        style: FontStyle<'_>,
     ) -> parley::Layout<()> {
         let size = if self.large_text { size * 1.15 } else { size };
         let mut builder = self.layout_cx.ranged_builder(&mut self.fonts, text, 1.0, true);
@@ -452,7 +466,12 @@ impl Renderer {
         builder.push_default(StyleProperty::FontWeight(if bold { FontWeight::BOLD } else { FontWeight::NORMAL }));
         builder.push_default(StyleProperty::LineHeight(parley::LineHeight::FontSizeRelative(1.25)));
         builder.push_default(StyleProperty::OverflowWrap(overflow));
-        if let Some(range) = emphasis {
+        if let Some(family) = style.family {
+            builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
+                FontFamilyName::named(family),
+            )));
+        }
+        if let Some(range) = style.emphasis {
             builder.push(StyleProperty::FontWeight(FontWeight::BOLD), range);
         }
         let mut layout: parley::Layout<()> = builder.build(text);
@@ -474,6 +493,8 @@ impl Renderer {
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
                 let run = glyph_run.run();
+                let coordinates: Vec<i16> = run.normalized_coords().iter()
+                    .map(|coord| coord.to_bits()).collect();
                 self.ctx.set_transform(Affine::translate(((t.x + dx) as f64, t.y as f64)));
                 self.ctx.set_paint(gray(ink));
                 let _ = self
@@ -481,8 +502,7 @@ impl Renderer {
                     .glyph_run(&mut self.resources, run.font())
                     .font_size(run.font_size())
                     .hint(true)
-                    // The bundled Noto fonts are static, so there are no variation coordinates.
-                    .normalized_coords(&[])
+                    .normalized_coords(&coordinates)
                     .fill_glyphs(glyph_run.positioned_glyphs().map(|g| Glyph { id: g.id, x: g.x, y: g.y }));
             }
         }
@@ -492,9 +512,43 @@ impl Renderer {
 
     /// The pixel width of one line of text.
     fn text_width(&mut self, text: &str, size: f32, bold: bool) -> f32 {
-        let layout = self.layout_text(text, size, bold, f32::MAX);
-        let width = layout.lines().next().map_or(0.0, |l| l.metrics().advance);
+        self.text_width_with_family(text, size, bold, None)
+    }
+
+    fn text_width_with_family(
+        &mut self,
+        text: &str,
+        size: f32,
+        bold: bool,
+        family: Option<&str>,
+    ) -> f32 {
+        let layout = self.layout_with_style(
+            text,
+            size,
+            bold,
+            f32::MAX,
+            parley::OverflowWrap::Normal,
+            FontStyle { family, ..FontStyle::default() },
+        );
+        let width = layout.lines().next().map_or(0.0, |line| line.metrics().advance);
         width
+    }
+
+    fn font_family_for_file(&mut self, path: &str) -> Option<String> {
+        if let Some(family) = self.font_file_families.get(path) {
+            return family.clone();
+        }
+        // Give each file its own family. A user font can share the internal family
+        // name of a bundled font, or of a different file in the picker.
+        let family = std::fs::read(path).ok().and_then(|data| {
+            let name = format!("PrimitiveOS loaded file {}", self.font_file_families.len());
+            let registered = self.fonts.collection.register_fonts(data.into(), Some(
+                FontInfoOverride { family_name: Some(&name), ..FontInfoOverride::default() },
+            ));
+            (!registered.is_empty()).then_some(name)
+        });
+        self.font_file_families.insert(path.to_owned(), family.clone());
+        family
     }
 
     /// Draw the shared drive-mode artwork using the embedded PNG and a white page.

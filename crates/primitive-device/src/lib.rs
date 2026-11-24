@@ -158,11 +158,33 @@ pub fn charging() -> bool {
     power_source() == Source::Charging
 }
 
+/// The level and charger status used by compact battery displays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BatteryStatus {
+    pub percent: Option<u32>,
+    pub charging: bool,
+    pub fully_charged: bool,
+}
+
+/// Read a battery snapshot. A full hardware report can coincide with charging.
+pub fn battery_status() -> BatteryStatus {
+    let status = sysfs_text(profile::ACTIVE.charger_status);
+    BatteryStatus {
+        percent: battery(),
+        charging: power_source_with_status(&status) == Source::Charging,
+        fully_charged: status == "Full",
+    }
+}
+
 pub fn battery_reading() -> Reading {
     Reading { percent: battery(), source: power_source() }
 }
 
 fn power_source() -> Source {
+    power_source_with_status(&sysfs_text(profile::ACTIVE.charger_status))
+}
+
+fn power_source_with_status(status: &str) -> Source {
     let bit = |value| match value {
         Some(0) => Some(false),
         Some(1) => Some(true),
@@ -174,7 +196,7 @@ fn power_source() -> Source {
             bit(get_int(POWERD, "isCharging")),
             bit(sysfs_text(profile::ACTIVE.charger_charging).parse().ok()),
         ],
-        &sysfs_text(profile::ACTIVE.charger_status),
+        status,
     )
 }
 

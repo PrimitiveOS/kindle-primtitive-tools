@@ -147,7 +147,20 @@ impl Canvas {
     }
 
     pub fn text(&mut self, rect: Rect, content: &str, style: TextStyle) {
-        self.draw_text(rect, content, style, None);
+        self.draw_text(rect, content, style, None, None);
+    }
+
+    /// Draw text using the family registered from a font file. If the file cannot be loaded,
+    /// use the default family, as the ordinary `text` method does.
+    pub fn text_with_font_file(
+        &mut self,
+        rect: Rect,
+        content: &str,
+        style: TextStyle,
+        font_file: &str,
+    ) {
+        let family = self.renderer.font_family_for_file(font_file);
+        self.draw_text(rect, content, style, None, family.as_deref());
     }
 
     /// Draw a bold UTF-8 byte range in the same shaped, wrapped paragraph.
@@ -161,7 +174,7 @@ impl Canvas {
     ) {
         let range = (!emphasis.is_empty() && content.get(emphasis.clone()).is_some())
             .then_some(emphasis);
-        self.draw_text(rect, content, style, range);
+        self.draw_text(rect, content, style, range, None);
     }
 
     fn draw_text(
@@ -170,6 +183,7 @@ impl Canvas {
         content: &str,
         style: TextStyle,
         emphasis: Option<std::ops::Range<usize>>,
+        family: Option<&str>,
     ) {
         if rect.w <= 0 || rect.h <= 0 || style.lines == 0 {
             return;
@@ -182,7 +196,7 @@ impl Canvas {
         let clip = super::kurbo::Shape::to_path(&super::krect(rect), 0.1);
         self.renderer.ctx.set_transform(super::Affine::IDENTITY);
         self.renderer.ctx.push_clip_layer(&clip);
-        self.renderer.text_with_emphasis(
+        self.renderer.text_with_style(
             Text {
                 text: content,
                 x: rect.x as f32,
@@ -195,7 +209,7 @@ impl Canvas {
                 gray: style.ink,
             },
             style.overflow,
-            emphasis,
+            super::FontStyle { emphasis, family },
         );
         self.renderer.ctx.pop_layer();
     }
@@ -208,6 +222,25 @@ impl Canvas {
     pub fn measure_with_weight(&mut self, content: &str, size: i32, bold: bool) -> i32 {
         self.renderer
             .text_width(content, self.px(size).max(1) as f32, bold)
+            .ceil() as i32
+    }
+
+    /// Measure text with the same family selected by `text_with_font_file`.
+    pub fn measure_with_font_file(
+        &mut self,
+        content: &str,
+        size: i32,
+        bold: bool,
+        font_file: &str,
+    ) -> i32 {
+        let family = self.renderer.font_family_for_file(font_file);
+        self.renderer
+            .text_width_with_family(
+                content,
+                self.px(size).max(1) as f32,
+                bold,
+                family.as_deref(),
+            )
             .ceil() as i32
     }
 
