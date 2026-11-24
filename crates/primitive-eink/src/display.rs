@@ -94,14 +94,19 @@ impl Display {
     }
 
     pub fn show(&mut self, upright: Vec<u8>, settings: &Settings, full: bool) {
+        self.present(upright, settings, full);
+    }
+
+    /// Present a frame and report whether the panel accepted it.
+    pub fn present(&mut self, upright: Vec<u8>, settings: &Settings, full: bool) -> bool {
         if self.paused {
-            return;
+            return false;
         }
         let fb_turn = self.fb_turn();
         let frame = kl_render::for_panel(upright, settings.rotation, fb_turn);
         let Some(panel) = self.panel.as_mut() else {
             self.last = frame;
-            return;
+            return false;
         };
         let t = Instant::now();
         let result = if full || self.last.len() != frame.len() {
@@ -119,14 +124,17 @@ impl Display {
                 self.presented_frame |= w > 0 && h > 0;
                 self.last = frame;
                 log(&format!("draw {wave} {w}x{h} at {x},{y} in {} ms (fb turn {fb_turn})", t.elapsed().as_millis()));
+                self.presented_frame
             }
             Ok((false, ..)) => {
                 self.last.clear();
                 log("draw: the framebuffer is not in a drawable state");
+                false
             }
             Err(e) => {
                 self.last.clear();
                 log(&format!("draw: {e}"));
+                false
             }
         }
     }
@@ -135,11 +143,16 @@ impl Display {
     /// launcher asks for after a theme switch: the launcher has just flashed the screen, and a flash here would show
     /// the inverse of the new theme, which is the old one, for a moment.
     pub fn show_calm(&mut self, upright: Vec<u8>, settings: &Settings) {
+        self.present_calm(upright, settings);
+    }
+
+    /// Present a calm full-screen frame and report whether the panel accepted it.
+    pub fn present_calm(&mut self, upright: Vec<u8>, settings: &Settings) -> bool {
         let fb_turn = self.fb_turn();
         let frame = kl_render::for_panel(upright, settings.rotation, fb_turn);
         let Some(panel) = self.panel.as_mut() else {
             self.last = frame;
-            return;
+            return false;
         };
         let t = Instant::now();
         match panel.draw(W, (0, 0, W, H), &frame, eink::WAVE_GC16, false) {
@@ -147,14 +160,17 @@ impl Display {
                 self.presented_frame = true;
                 self.last = frame;
                 log(&format!("draw GC16 calm {W}x{H} in {} ms (fb turn {fb_turn})", t.elapsed().as_millis()));
+                true
             }
             Ok(false) => {
                 self.last.clear();
                 log("draw: the framebuffer is not in a drawable state");
+                false
             }
             Err(e) => {
                 self.last.clear();
                 log(&format!("draw: {e}"));
+                false
             }
         }
     }

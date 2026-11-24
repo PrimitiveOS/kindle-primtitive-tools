@@ -26,6 +26,9 @@
 //! - **The system swipe.** A swipe down from the top edge (it starts in the top 160 px, moves more than 150 px down,
 //!   and is mostly vertical) opens the launcher's quick settings. The kit drops it, so the app never gets it in
 //!   `App::input` or `App::swipe`. Other swipes from the top edge (up, or sideways) still reach the app.
+//! - **Foreground portrait turn.** When the supervisor provides `KL_APP_TURN_FILE`, the kit publishes a `v1 U follow`
+//!   or `v1 D fixed` record after the corresponding frame is presented. The scoped record follows successful normal,
+//!   calm and USB draws. When the supervisor has no scoped path, the existing `orientation` file is used.
 //!
 //! The app's library entry declares `# Wake: redraw` in its first ten lines and ignores SIGUSR1 in its own shell
 //! (`[ "${PRIMITIVE_LAUNCHER:-0}" = 1 ] && trap '' USR1`), as the app template's `deploy/Hello.sh` does.
@@ -48,7 +51,10 @@ use kl_kindle::{device, display::Display, profile};
 use primitive_input as input;
 use primitive_ui::{Canvas, Input, full_screen_message};
 
+mod orientation;
 mod storage;
+
+use orientation::{Publisher as TurnPublisher, Turn};
 
 pub use kl_core::Rotation;
 pub use kl_kindle::{
@@ -366,10 +372,31 @@ enum Event {
     Redraw,
 }
 
-fn publish_rotation(run: &Path, rotation: Rotation) {
+fn publish_legacy_rotation(run: &Path, rotation: Rotation) {
     input::TURN.store(rotation.turn(), Ordering::Relaxed);
     // The supervisor's orientation file is in RAM and needs no flash lease.
     let _ = write_atomic(&run.join("orientation"), rotation.letter().as_bytes());
+}
+
+fn publish_presented_turn(publisher: &mut TurnPublisher, turn: Turn, success: bool) {
+    if publisher.scoped() && success {
+        input::TURN.store(turn.rotation.turn(), Ordering::Relaxed);
+    }
+    publisher.presented(turn, success);
+}
+
+fn inherited_turn(settings: &Settings, read_sensor: impl FnOnce() -> Option<Rotation>) -> Rotation {
+    if settings.auto_rotation {
+        read_sensor().unwrap_or(settings.rotation)
+    } else {
+        settings.rotation
+    }
+}
+
+fn watch_turn(events: mpsc::Sender<Event>, initial: Rotation) {
+    thread::spawn(move || {
+        primitive_device::orientation_loop(initial, |turn| events.send(Event::Turn(turn)).is_ok());
+    });
 }
 
 /// Use the shared launcher settings and device driver while foregrounded by the launcher.
@@ -392,7 +419,10 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             writeln!(file, "{message}")
         });
     };
-    UNDER_LAUNCHER.store(std::env::var("PRIMITIVE_LAUNCHER").as_deref() == Ok("1"), Ordering::Relaxed);
+    let under_launcher = std::env::var("PRIMITIVE_LAUNCHER").as_deref() == Ok("1");
+    UNDER_LAUNCHER.store(under_launcher, Ordering::Relaxed);
+    let turn_path = if under_launcher { std::env::var_os("KL_APP_TURN_FILE").map(PathBuf::from) } else { None };
+    let mut turn_publisher = TurnPublisher::new(&run, turn_path);
     let mut settings = display_settings(
         &fs::read_to_string(launcher.join("settings.txt")).unwrap_or_default(),
         &fs::read_to_string(app_dir.join("settings.txt")).unwrap_or_default(),
@@ -407,13 +437,13 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     let mut canvas = Canvas::new(WIDTH, HEIGHT, &font_paths(&fonts))?;
     let mut display = Display::open();
 
-    if settings.auto_rotation {
-        settings.rotation = device::accelerometer_turn().unwrap_or(settings.rotation);
-    }
-    let mut inherited_rotation = settings.rotation;
-    settings.rotation = app.preferred_rotation().unwrap_or(inherited_rotation);
+    let mut inherited_rotation = inherited_turn(&settings, device::accelerometer_turn);
+    let mut turn = Turn::resolve(app.preferred_rotation(), inherited_rotation);
+    settings.rotation = turn.rotation;
     let mut dark_override = app.preferred_dark_mode();
-    publish_rotation(&run, settings.rotation);
+    if !turn_publisher.scoped() {
+        publish_legacy_rotation(&run, settings.rotation);
+    }
     let (tx, rx) = mpsc::channel();
     if let Some(path) = input::find(profile::ACTIVE.touch_name) {
         let events = tx.clone();
@@ -440,21 +470,19 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             });
         });
     }
+    let mut dormant_turn_watch = None;
     if settings.auto_rotation {
-        let orientation = inherited_rotation;
-        let events = tx.clone();
-        thread::spawn(move || {
-            primitive_device::orientation_loop(orientation, |turn| {
-                events.send(Event::Turn(turn)).is_ok()
-            });
-        });
+        watch_turn(tx.clone(), inherited_rotation);
+    } else if turn_publisher.scoped() {
+        dormant_turn_watch = Some(tx.clone());
     }
     log("Opened");
-    display.show(
+    let presented = display.present(
         frame(&app, &mut canvas, settings.dark_mode),
         &settings,
         true,
     );
+    publish_presented_turn(&mut turn_publisher, turn, presented);
 
     // A fallback font source may map a file from user storage, so keep the startup pause in that case.
     let managed_storage = fonts_in_ram
@@ -467,7 +495,6 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         thread::spawn(move || watch_usb(events));
     }
     // Under Primitive Launcher the launcher owns sleep, the lock screen and the theme; it asks for a redraw.
-    let under_launcher = std::env::var("PRIMITIVE_LAUNCHER").as_deref() == Ok("1");
     if under_launcher {
         follow_redraw_signal(tx.clone());
     }
@@ -485,14 +512,25 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         // before handling what woke the loop, and draw the whole screen once.
         let mut redraw_now = false;
         if under_launcher && REDRAW.swap(false, Ordering::Relaxed) {
-            let fresh = display_settings(
-                &fs::read_to_string(launcher.join("settings.txt")).unwrap_or_default(),
-                &fs::read_to_string(app_dir.join("settings.txt")).unwrap_or_default(),
-            );
-            settings.dark_mode = fresh.dark_mode;
-            // A turn in launcher Settings over the app: without auto-rotation the setting is the rotation.
-            if !settings.auto_rotation {
-                inherited_rotation = fresh.rotation;
+            let launcher_settings = fs::read_to_string(launcher.join("settings.txt"));
+            // Retain the last known Launcher settings while drive mode unmounts Documents.
+            if launcher_settings.is_ok() || !turn_publisher.scoped() {
+                let fresh = display_settings(
+                    &launcher_settings.unwrap_or_default(),
+                    &fs::read_to_string(app_dir.join("settings.txt")).unwrap_or_default(),
+                );
+                settings.dark_mode = fresh.dark_mode;
+                if turn_publisher.scoped() {
+                    settings.auto_rotation = fresh.auto_rotation;
+                    inherited_rotation = inherited_turn(&fresh, device::accelerometer_turn);
+                    if settings.auto_rotation {
+                        if let Some(events) = dormant_turn_watch.take() {
+                            watch_turn(events, inherited_rotation);
+                        }
+                    }
+                } else if !settings.auto_rotation {
+                    inherited_rotation = fresh.rotation;
+                }
             }
             if lifecycle.is_awake() {
                 redraw_now = true;
@@ -510,7 +548,7 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             // The swipe down from the top edge is the system's (quick settings) under the launcher, not the app's.
             Ok(Event::Input(input, _)) if under_launcher && is_system_swipe(input) => Change::None,
             Ok(Event::Input(input, start_x)) => {
-                if !usb_changed {
+                if !usb_changed && !turn_publisher.needs_frame(turn) {
                     if let Some(image) =
                         lifecycle.press_feedback(&app, &mut canvas, input, settings.dark_mode)
                     {
@@ -529,7 +567,7 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             }
             // Only a wake-up: the request was taken above.
             Ok(Event::Redraw) => Change::None,
-            Ok(Event::Turn(rotation)) => {
+            Ok(Event::Turn(rotation)) if settings.auto_rotation => {
                 inherited_rotation = rotation;
                 Change::None
             }
@@ -546,16 +584,21 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             }
         }
         if change != Change::Exit {
-            let rotation = app.preferred_rotation().unwrap_or(inherited_rotation);
+            turn = Turn::resolve(app.preferred_rotation(), inherited_rotation);
             let old_rotation = settings.rotation;
-            if rotation != settings.rotation {
-                settings.rotation = rotation;
-                publish_rotation(&run, rotation);
+            if turn.rotation != old_rotation {
+                settings.rotation = turn.rotation;
+                if !turn_publisher.scoped() {
+                    publish_legacy_rotation(&run, turn.rotation);
+                }
             }
             let preferred_dark = app.preferred_dark_mode();
-            if lifecycle.is_awake() && (rotation != old_rotation || preferred_dark != dark_override)
-            {
-                change = Change::Full;
+            if lifecycle.is_awake() {
+                if turn.rotation != old_rotation || preferred_dark != dark_override || turn_publisher.needs_frame(turn) {
+                    change = Change::Full;
+                } else {
+                    turn_publisher.update_policy(turn);
+                }
             }
             dark_override = preferred_dark;
         }
@@ -570,7 +613,8 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
                     );
                     canvas.finish(settings.dark_mode)
                 });
-                display.show(image, &settings, true);
+                let presented = display.present(image, &settings, true);
+                publish_presented_turn(&mut turn_publisher, turn, presented);
             }
             continue;
         }
@@ -584,13 +628,14 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             Change::Exit => break,
             Change::None | Change::Partial | Change::Full => {
                 let image = frame(&app, &mut canvas, settings.dark_mode);
-                if redraw_now && change == Change::Full {
+                let presented = if redraw_now && change == Change::Full {
                     // The launcher flashed the screen when the theme changed; a second flash would show the old
                     // theme for a moment (the inverse of the new one).
-                    display.show_calm(image, &settings);
+                    display.present_calm(image, &settings)
                 } else {
-                    display.show(image, &settings, change == Change::Full);
-                }
+                    display.present(image, &settings, change == Change::Full)
+                };
+                publish_presented_turn(&mut turn_publisher, turn, presented);
             }
         }
     }
@@ -860,6 +905,19 @@ mod tests {
         assert!(effective_dark(Some(false), true, true), "a preference does not override the system theme");
         assert!(!effective_dark(Some(false), true, false));
         assert!(effective_dark(None, true, false));
+    }
+
+    #[test]
+    fn inherited_turn_uses_manual_settings_or_the_current_sensor() {
+        let mut settings = Settings {
+            rotation: Rotation::UpsideDown,
+            auto_rotation: false,
+            ..Settings::default()
+        };
+        assert_eq!(inherited_turn(&settings, || panic!("manual orientation has no sensor read")), Rotation::UpsideDown);
+        settings.auto_rotation = true;
+        assert_eq!(inherited_turn(&settings, || Some(Rotation::Upright)), Rotation::Upright);
+        assert_eq!(inherited_turn(&settings, || None), Rotation::UpsideDown);
     }
 
     #[test]
