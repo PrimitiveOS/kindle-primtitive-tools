@@ -16,6 +16,7 @@ pub mod store;
 pub mod store_open;
 pub mod tz;
 pub mod ui;
+pub mod viewport;
 pub mod wallpaper;
 pub mod wifi;
 pub mod models;

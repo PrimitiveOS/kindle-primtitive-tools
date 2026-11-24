@@ -1,5 +1,8 @@
 //! Off-device proof. Run with an output directory, Noto Sans regular and bold.
-use kl_core::{Action, DeviceCmd, Input, Layout, Rect, Screen, Status, Ui};
+use kl_core::{
+    viewport::{LogicalTurn, ViewportTransform},
+    Action, DeviceCmd, Input, Layout, Rect, Screen, Status, Ui,
+};
 use kl_render::component::{Canvas, TextStyle};
 use std::{fs, path::Path};
 
@@ -60,11 +63,10 @@ enum Firmware {
 }
 
 impl Firmware {
-    /// A half turn is its own inverse.
-    fn to_memory(self, (x, y): (usize, usize), w: usize, h: usize) -> (usize, usize) {
+    fn number(self) -> u32 {
         match self {
-            Self::Upright => (x, y),
-            Self::UpsideDown => (w - 1 - x, h - 1 - y),
+            Self::Upright => 0,
+            Self::UpsideDown => 2,
         }
     }
 }
@@ -82,28 +84,19 @@ impl Transform {
         self.turn.size(self.w, self.h)
     }
 
-    fn logical_index(self, memory_index: usize) -> usize {
-        let point = (memory_index % self.w, memory_index / self.w);
-        let native = self.firmware.to_memory(point, self.w, self.h);
-        let (x, y) = self.turn.native_to_view(native, self.w, self.h);
-        let (width, _) = self.logical_size();
-        y * width + x
-    }
-
-    fn to_panel(self, logical: &[u8]) -> Vec<u8> {
-        assert_eq!(logical.len(), self.w * self.h);
-        (0..logical.len())
-            .map(|index| logical[self.logical_index(index)])
-            .collect()
-    }
-
-    fn to_view(self, panel: &[u8]) -> Vec<u8> {
-        assert_eq!(panel.len(), self.w * self.h);
-        let mut logical = vec![0; panel.len()];
-        for (index, &pixel) in panel.iter().enumerate() {
-            logical[self.logical_index(index)] = pixel;
-        }
-        logical
+    fn raster(self) -> ViewportTransform {
+        let logical = match self.turn {
+            Turn::Upright => LogicalTurn::Upright,
+            Turn::Clockwise => LogicalTurn::Clockwise,
+            Turn::UpsideDown => LogicalTurn::UpsideDown,
+            Turn::Counterclockwise => LogicalTurn::Counterclockwise,
+        };
+        ViewportTransform::new(
+            (self.w as u32, self.h as u32),
+            logical,
+            self.firmware.number(),
+        )
+        .unwrap()
     }
 
     fn screen_point(self, point: (usize, usize)) -> (usize, usize) {
@@ -205,14 +198,16 @@ struct Snapshot {
 
 impl Snapshot {
     fn backdrop(self, generation: u64, panel: &[u8]) -> Option<Vec<u8>> {
-        (self.generation == generation && panel.len() == self.transform.w * self.transform.h)
-            .then(|| self.transform.to_view(panel))
+        if self.generation != generation {
+            return None;
+        }
+        self.transform.raster().unproject(panel.to_vec())
     }
 }
 
 fn exercise(transform: Transform, page: &[u8], fonts: &[String], out: &Path, label: &str) {
     let size = transform.logical_size();
-    let panel = transform.to_panel(page);
+    let panel = transform.raster().project(page.to_vec()).unwrap();
     let mut memory = vec![PAD; MAP_BYTES];
     let y_offset = 17;
     apply_native_region(&mut memory, y_offset, &panel, (0, 0, WIDTH, HEIGHT));
@@ -263,7 +258,7 @@ fn exercise(transform: Transform, page: &[u8], fonts: &[String], out: &Path, lab
         &overlay[first_uncovered_row..],
         &page[first_uncovered_row..]
     );
-    let overlay_panel = transform.to_panel(&overlay);
+    let overlay_panel = transform.raster().project(overlay.clone()).unwrap();
     let changed = kl_render::changed_rect(&panel, &overlay_panel, WIDTH).unwrap();
     apply_native_region(&mut memory, y_offset, &overlay_panel, changed);
     assert_eq!(visible_frame(&memory, y_offset), overlay_panel);
@@ -363,42 +358,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_stock_matrix_and_round_trips_four_turns() {
-        let input: Vec<_> = (0..15).collect();
-        let cases = [
-            (Turn::Upright, input.clone()),
-            (
-                Turn::Clockwise,
-                vec![4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11, 0, 5, 10],
-            ),
-            (Turn::UpsideDown, (0..15).rev().collect()),
-            (
-                Turn::Counterclockwise,
-                vec![10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4],
-            ),
-        ];
-        for (turn, expected) in cases {
+    fn round_trips_native_touch_coordinates_for_four_turns() {
+        for turn in [
+            Turn::Upright,
+            Turn::Clockwise,
+            Turn::UpsideDown,
+            Turn::Counterclockwise,
+        ] {
             let transform = Transform {
                 turn,
                 firmware: Firmware::Upright,
                 w: 3,
                 h: 5,
             };
-            assert_eq!(transform.to_panel(&input), expected);
-            assert_eq!(transform.to_view(&expected), input);
-            let upside_down = Transform {
-                firmware: Firmware::UpsideDown,
-                ..transform
-            };
-            let reversed: Vec<_> = expected.into_iter().rev().collect();
-            assert_eq!(upside_down.to_panel(&input), reversed);
-            assert_eq!(upside_down.to_view(&reversed), input);
             let (w, h) = transform.logical_size();
             for x in 0..w {
                 for y in 0..h {
                     let native = turn.to_native((x, y), 3, 5);
                     assert_eq!(transform.screen_point(native), (x, y));
-                    assert_eq!(upside_down.screen_point(native), (x, y));
                 }
             }
         }

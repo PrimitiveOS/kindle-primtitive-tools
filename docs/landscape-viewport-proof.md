@@ -92,6 +92,22 @@ Reader's separate user inversion setting.
    preferences and the other apps can keep using the existing API.
    [KOReader reflow on rotation](https://github.com/koreader/koreader/blob/9192014d8bd82a91dc1012473be0f238dedfdb54/frontend/apps/reader/modules/readerview.lua#L892-L919)
 
+## Shared display API
+
+`ViewportTransform` projects and recovers packed eight-bit frames without
+including the framebuffer row padding. `Display::present_view` takes a
+logical frame, its dimensions and the requested screen turn. It rejects
+unsupported panel configurations and clears its diff baseline when the
+logical turn or validated framebuffer configuration changes.
+`present_view_region` clips in the logical viewport before projecting and
+aligning the exact physical update rectangle. The first complete frame after
+a region write is redrawn in full.
+
+The existing portrait settings and app kit still use their existing entry
+points. This API does not negotiate overlay ownership or resize app layouts.
+[Viewport transform](../crates/kl-core/src/viewport.rs) ·
+[Viewport presentation](../crates/primitive-eink/src/display.rs)
+
 ## Mac proof
 
 Run from the Tools repository root with readable copies of Noto Sans Regular

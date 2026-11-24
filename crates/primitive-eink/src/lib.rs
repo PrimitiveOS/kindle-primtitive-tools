@@ -173,12 +173,121 @@ struct FixInfo {
     reserved: [u16; 2],
 }
 
+type Region = (u32, u32, u32, u32);
+
+/// The fixed layout used to establish a panel mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mapping {
+    start: libc::c_ulong,
+    len: usize,
+    pitch: usize,
+}
+
+impl From<FixInfo> for Mapping {
+    fn from(fix: FixInfo) -> Self {
+        Self {
+            start: fix.smem_start,
+            len: fix.smem_len as usize,
+            pitch: fix.line_length as usize,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisibleRows {
+    width: u32,
+    height: u32,
+    pitch: usize,
+    offset: usize,
+}
+
+impl VisibleRows {
+    fn new(var: VarInfo, pitch: usize) -> Option<Self> {
+        let width = var.xres;
+        let height = var.yres;
+        if width == 0 || height == 0 || width as usize > pitch {
+            return None;
+        }
+        let offset = (var.yoffset as usize).checked_mul(pitch)?;
+        Some(Self {
+            width,
+            height,
+            pitch,
+            offset,
+        })
+    }
+
+    /// Each tightly packed source row and its start in the mapped framebuffer.
+    fn runs(
+        self,
+        (x, y, w, h): Region,
+        source_len: usize,
+        mapped_len: usize,
+    ) -> Option<impl Iterator<Item = (std::ops::Range<usize>, usize)>> {
+        let (right, bottom) = (x.checked_add(w)?, y.checked_add(h)?);
+        if w == 0 || h == 0 || right > self.width || bottom > self.height {
+            return None;
+        }
+        let x = x as usize;
+        let right = right as usize;
+        let stride = self.width as usize;
+        let last_row = (bottom - 1) as usize;
+        let source_end = (bottom as usize).checked_mul(stride)?;
+        let mapped_end = self
+            .offset
+            .checked_add(last_row.checked_mul(self.pitch)?)?
+            .checked_add(right)?;
+        if source_end > source_len || mapped_end > mapped_len {
+            return None;
+        }
+        Some((y as usize..bottom as usize).map(move |row| {
+            let source = row * stride;
+            (
+                source + x..source + right,
+                self.offset + row * self.pitch + x,
+            )
+        }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanelConfig {
+    rotation: u32,
+    rows: VisibleRows,
+}
+
+impl PanelConfig {
+    fn new(
+        var: VarInfo,
+        opened: Mapping,
+        current: Mapping,
+        (width, height): (u32, u32),
+    ) -> Option<Self> {
+        if opened != current
+            || var.bits_per_pixel != 8
+            || var.xoffset != 0
+            || !matches!(var.rotate, 0 | 2)
+            || (var.xres, var.yres) != (width, height)
+        {
+            return None;
+        }
+        // A rejected viewport must never write to the old mapping, including when the
+        // firmware has moved the visible page beyond its end.
+        let rows = VisibleRows::new(var, opened.pitch)?;
+        let frame_len = (width as usize).checked_mul(height as usize)?;
+        let _ = rows.runs((0, 0, width, height), frame_len, opened.len)?;
+        Some(Self {
+            rotation: var.rotate,
+            rows,
+        })
+    }
+}
+
 /// The framebuffer, mapped for writing, and the update counter.
 pub struct Panel {
     file: File,
     map: *mut u8,
-    len: usize,
-    line_length: usize,
+    mapping: Mapping,
     marker: u32,
 }
 
@@ -191,16 +300,15 @@ impl Panel {
             .open(FRAMEBUFFER)
             .map_err(|e| format!("open {FRAMEBUFFER}: {e}"))?;
         let fd = file.as_raw_fd();
-        // SAFETY: FixInfo is plain data; the ioctl fills it.
-        let mut fix: FixInfo = unsafe { std::mem::zeroed() };
-        if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix) } < 0 {
-            return Err(format!("FBIOGET_FSCREENINFO: {}", io::Error::last_os_error()));
-        }
+        let mapping = fixed_info(fd)?.into();
         let var = var_info(fd)?;
         if var.bits_per_pixel != 8 {
-            return Err(format!("framebuffer is {} bits per pixel, not 8", var.bits_per_pixel));
+            return Err(format!(
+                "framebuffer is {} bits per pixel, not 8",
+                var.bits_per_pixel
+            ));
         }
-        let len = fix.smem_len as usize;
+        let Mapping { len, .. } = mapping;
         // SAFETY: mapping the framebuffer this process opened; the length is the driver's own.
         let map = unsafe {
             libc::mmap(
@@ -215,7 +323,12 @@ impl Panel {
         if map == libc::MAP_FAILED {
             return Err(format!("mmap: {}", io::Error::last_os_error()));
         }
-        Ok(Panel { file, map: map as *mut u8, len, line_length: fix.line_length as usize, marker: 0 })
+        Ok(Panel {
+            file,
+            map: map as *mut u8,
+            mapping,
+            marker: 0,
+        })
     }
 
     /// Copy the region (`x`, `y`, `w`, `h`) of `frame` (a whole screen of `width` gray pixels a row) to the
@@ -223,37 +336,83 @@ impl Panel {
     /// flash with GC16). An upside-down screen (rotation 2) is drawn as it is: the panel shows the memory
     /// unturned. Returns `Ok(false)` without drawing when this path cannot draw the screen as it is
     /// (landscape, or another size), so the caller can use fbink.
-    pub fn draw(&mut self, width: u32, region: (u32, u32, u32, u32), frame: &[u8], wave: u32, full: bool) -> Result<bool, String> {
-        let (x, y, w, rows) = region;
+    pub fn draw(
+        &mut self,
+        width: u32,
+        region: (u32, u32, u32, u32),
+        frame: &[u8],
+        wave: u32,
+        full: bool,
+    ) -> Result<bool, String> {
+        let var = var_info(self.file.as_raw_fd())?;
+        if !matches!(var.rotate, 0 | 2) || var.xoffset != 0 || var.xres != width {
+            return Ok(false);
+        }
+        let Some(rows) = VisibleRows::new(var, self.mapping.pitch) else {
+            return Ok(false);
+        };
+        self.draw_rows(rows, region, frame, wave, full)
+    }
+
+    fn viewport_config(&self, size: (u32, u32)) -> Result<Option<PanelConfig>, String> {
         let fd = self.file.as_raw_fd();
-        let var = var_info(fd)?;
-        let fits = (var.rotate == 0 || var.rotate == 2)
-            && var.xoffset == 0
-            && var.xres == width
-            && x + w <= width
-            && y + rows <= var.yres
-            && frame.len() >= (width * (y + rows)) as usize;
-        if !fits || rows == 0 || w == 0 {
+        let current = fixed_info(fd)?.into();
+        Ok(PanelConfig::new(var_info(fd)?, self.mapping, current, size))
+    }
+
+    fn matches_viewport(&self, expected: PanelConfig) -> Result<bool, String> {
+        let size = (expected.rows.width, expected.rows.height);
+        Ok(self.viewport_config(size)? == Some(expected))
+    }
+
+    fn draw_view(
+        &mut self,
+        expected: PanelConfig,
+        region: Region,
+        frame: &[u8],
+        wave: u32,
+        full: bool,
+    ) -> Result<bool, String> {
+        if !self.matches_viewport(expected)? {
             return Ok(false);
         }
-        let (stride, x, w) = (width as usize, x as usize, w as usize);
-        let base = var.yoffset as usize * self.line_length;
-        let last_end = base + (y as usize + rows as usize - 1) * self.line_length + x + w;
-        if stride > self.line_length || last_end > self.len {
+        self.draw_rows(expected.rows, region, frame, wave, full)
+    }
+
+    fn draw_rows(
+        &mut self,
+        rows: VisibleRows,
+        region: Region,
+        frame: &[u8],
+        wave: u32,
+        full: bool,
+    ) -> Result<bool, String> {
+        let Some(runs) = rows.runs(region, frame.len(), self.mapping.len) else {
             return Ok(false);
+        };
+        for (source, destination) in runs {
+            let row = &frame[source];
+            // SAFETY: the runs were checked against the lengths of the source and the mapping.
+            unsafe {
+                std::ptr::copy_nonoverlapping(row.as_ptr(), self.map.add(destination), row.len())
+            };
         }
-        for r in y as usize..(y + rows) as usize {
-            let dst = base + r * self.line_length + x;
-            // SAFETY: the destination run is inside the mapping (checked above) and the source run inside `frame`.
-            unsafe { std::ptr::copy_nonoverlapping(frame.as_ptr().add(r * stride + x), self.map.add(dst), w) };
-        }
-        let width = w as u32;
+        let (x, y, width, height) = region;
         self.marker = self.marker.wrapping_add(1).max(1);
         let (hist_bw, hist_gray) = hist_waves(wave);
         let mut update = UpdateZelda {
-            region: Rect { top: y, left: x as u32, width, height: rows },
+            region: Rect {
+                top: y,
+                left: x,
+                width,
+                height,
+            },
             waveform_mode: wave,
-            update_mode: if full { UPDATE_MODE_FULL } else { UPDATE_MODE_PARTIAL },
+            update_mode: if full {
+                UPDATE_MODE_FULL
+            } else {
+                UPDATE_MODE_PARTIAL
+            },
             update_marker: self.marker,
             temp: TEMP_USE_AMBIENT,
             hist_bw_waveform_mode: hist_bw,
@@ -261,7 +420,14 @@ impl Panel {
             ..UpdateZelda::default()
         };
         // SAFETY: the driver reads an UpdateZelda; the ioctl number carries its size.
-        if unsafe { libc::ioctl(fd, MXCFB_SEND_UPDATE_ZELDA as _, &mut update) } < 0 {
+        if unsafe {
+            libc::ioctl(
+                self.file.as_raw_fd(),
+                MXCFB_SEND_UPDATE_ZELDA as _,
+                &mut update,
+            )
+        } < 0
+        {
             return Err(format!("MXCFB_SEND_UPDATE: {}", io::Error::last_os_error()));
         }
         Ok(true)
@@ -274,14 +440,15 @@ impl Panel {
     pub fn snapshot(&self, width: u32, height: u32) -> Option<Vec<u8>> {
         let var = var_info(self.file.as_raw_fd()).ok()?;
         let (w, h) = (width as usize, height as usize);
-        let base = var.yoffset as usize * self.line_length;
-        if h == 0 || w > self.line_length || base + (h - 1) * self.line_length + w > self.len {
+        let Mapping { len, pitch, .. } = self.mapping;
+        let base = var.yoffset as usize * pitch;
+        if h == 0 || w > pitch || base + (h - 1) * pitch + w > len {
             return None;
         }
         let mut out = vec![0u8; w * h];
         for r in 0..h {
             // SAFETY: the source run is inside the mapping (checked above) and the destination inside `out`.
-            unsafe { std::ptr::copy_nonoverlapping(self.map.add(base + r * self.line_length), out.as_mut_ptr().add(r * w), w) };
+            unsafe { std::ptr::copy_nonoverlapping(self.map.add(base + r * pitch), out.as_mut_ptr().add(r * w), w) };
         }
         Some(out)
     }
@@ -295,8 +462,20 @@ impl Panel {
 impl Drop for Panel {
     fn drop(&mut self) {
         // SAFETY: unmapping the mapping made in `open`.
-        unsafe { libc::munmap(self.map as *mut libc::c_void, self.len) };
+        unsafe { libc::munmap(self.map as *mut libc::c_void, self.mapping.len) };
     }
+}
+
+fn fixed_info(fd: i32) -> Result<FixInfo, String> {
+    // SAFETY: FixInfo is plain data; the ioctl fills it.
+    let mut info: FixInfo = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut info) } < 0 {
+        return Err(format!(
+            "FBIOGET_FSCREENINFO: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(info)
 }
 
 fn var_info(fd: i32) -> Result<VarInfo, String> {
@@ -311,6 +490,70 @@ fn var_info(fd: i32) -> Result<VarInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_viewport_configurations_cannot_reach_the_framebuffer_copy() {
+        let size = (1264, 1680);
+        let var = VarInfo {
+            xres: size.0,
+            yres: size.1,
+            yoffset: 0,
+            bits_per_pixel: 8,
+            ..VarInfo::default()
+        };
+        let mapping = Mapping {
+            start: 0x5000,
+            len: 4_587_520,
+            pitch: 1280,
+        };
+        assert!(PanelConfig::new(var, mapping, mapping, size).is_some());
+        assert!(PanelConfig::new(VarInfo { rotate: 2, ..var }, mapping, mapping, size).is_some());
+        for bad in [
+            VarInfo { rotate: 1, ..var },
+            VarInfo { rotate: 3, ..var },
+            VarInfo {
+                bits_per_pixel: 16,
+                ..var
+            },
+            VarInfo { xoffset: 1, ..var },
+            VarInfo {
+                yoffset: u32::MAX,
+                ..var
+            },
+            VarInfo {
+                xres: size.1,
+                yres: size.0,
+                ..var
+            },
+            VarInfo {
+                yres: size.1 - 1,
+                ..var
+            },
+        ] {
+            assert!(PanelConfig::new(bad, mapping, mapping, size).is_none());
+        }
+        for changed in [
+            Mapping {
+                start: mapping.start + 4,
+                ..mapping
+            },
+            Mapping {
+                len: mapping.len - 1,
+                ..mapping
+            },
+            Mapping {
+                pitch: mapping.pitch + 16,
+                ..mapping
+            },
+        ] {
+            assert!(PanelConfig::new(var, mapping, changed, size).is_none());
+        }
+        let cramped = Mapping {
+            pitch: 1260,
+            ..mapping
+        };
+        assert!(PanelConfig::new(var, cramped, cramped, size).is_none());
+    }
 
     #[test]
     fn update_struct_matches_the_zelda_header() {

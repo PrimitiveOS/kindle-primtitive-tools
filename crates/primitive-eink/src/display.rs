@@ -2,14 +2,41 @@
 
 use std::time::Instant;
 
-use kl_core::Settings;
+use kl_core::{
+    viewport::{LogicalTurn, ViewportTransform},
+    Rect, Settings,
+};
 
 use primitive_device::{log, profile};
 
-use crate as eink;
+use crate::{self as eink, PanelConfig, Region};
 
 const W: u32 = profile::ACTIVE.screen_w;
 const H: u32 = profile::ACTIVE.screen_h;
+const PANEL_SIZE: (u32, u32) = (W, H);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewportFrame {
+    transform: ViewportTransform,
+    config: PanelConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameUpdate {
+    Full,
+    Partial(Region),
+    Unchanged,
+}
+
+fn frame_update(last: &[u8], frame: &[u8], width: u32, force_full: bool) -> FrameUpdate {
+    if force_full || last.len() != frame.len() {
+        return FrameUpdate::Full;
+    }
+    match kl_render::changed_rect(last, frame, width as usize) {
+        Some((x, y, w, h)) => FrameUpdate::Partial((x as u32, y as u32, w as u32, h as u32)),
+        None => FrameUpdate::Unchanged,
+    }
+}
 
 /// Shows frames on the panel: a full GC16 update on request, otherwise only the box around the changed
 /// pixels, with a non-flashing waveform (DU for pure black and white, AUTO when icons bring gray). A tap on one
@@ -17,6 +44,7 @@ const H: u32 = profile::ACTIVE.screen_h;
 pub struct Display {
     panel: Option<eink::Panel>,
     last: Vec<u8>,
+    viewport_baseline: Option<ViewportFrame>,
     presented_frame: bool,
     /// While an app owns the screen the launcher draws nothing: `show` and `show_region` do nothing.
     paused: bool,
@@ -31,7 +59,13 @@ impl Display {
                 None
             }
         };
-        Display { panel, last: Vec::new(), presented_frame: false, paused: false }
+        Display {
+            panel,
+            last: Vec::new(),
+            viewport_baseline: None,
+            presented_frame: false,
+            paused: false,
+        }
     }
 
     /// Stop or resume drawing. Resuming takes what is on the panel now (an app's screen) as the last frame, so the
@@ -39,6 +73,7 @@ impl Display {
     /// box, not the whole screen. Off the Kindle, or when the panel cannot be read, the next `show` is a full update.
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+        self.viewport_baseline = None;
         self.last = if paused { Vec::new() } else { self.snapshot().unwrap_or_default() };
     }
 
@@ -55,6 +90,7 @@ impl Display {
     /// updated, without a flash, when it is a pop-up's size (quick settings closing over an app). A change over most
     /// of the screen (the sleep picture going) gets one full update, as a calm update there leaves a ghost.
     pub fn restore(&mut self, frame: Vec<u8>) {
+        self.viewport_baseline = None;
         let Some(panel) = self.panel.as_mut() else { return };
         let changed = match panel.snapshot(W, H) {
             Some(now) if now.len() == frame.len() => kl_render::changed_rect(&now, &frame, W as usize),
@@ -102,37 +138,161 @@ impl Display {
         if self.paused {
             return false;
         }
+        self.leave_viewport();
         let fb_turn = self.fb_turn();
         let frame = kl_render::for_panel(upright, settings.rotation, fb_turn);
+        let update = frame_update(&self.last, &frame, W, full);
+        self.present_packed(frame, update, fb_turn, None)
+    }
+
+    /// Present an explicitly sized logical frame through the portrait framebuffer.
+    /// Returns false when the display is paused, the frame is malformed, or the
+    /// current panel mode cannot safely use the portrait mapping.
+    pub fn present_view(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        full: bool,
+    ) -> bool {
+        let Some(view) = self.checked_viewport(logical_size, turn) else {
+            return false;
+        };
+        let Some(frame) = view.transform.project(pixels) else {
+            return false;
+        };
+        let update = self.viewport_update(view, &frame, full);
+        let presented = self.present_packed(frame, update, view.config.rotation, Some(view.config));
+        self.viewport_baseline = presented.then_some(view);
+        presented
+    }
+
+    /// Present a clipped logical rectangle from a full logical frame. The
+    /// rectangle is projected before aligning its columns to e-ink update bounds.
+    /// As with `show_region`, the next complete presentation draws the full view.
+    pub fn present_view_region(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        area: Rect,
+    ) -> bool {
+        let Some(view) = self.checked_viewport(logical_size, turn) else {
+            return false;
+        };
+        let Some(rect) = view.transform.panel_rect(area) else {
+            return false;
+        };
+        let Some(frame) = view.transform.project(pixels) else {
+            return false;
+        };
+        let region = aligned_region(rect, W);
+        let result = self.present_packed(
+            frame,
+            FrameUpdate::Partial(region),
+            view.config.rotation,
+            Some(view.config),
+        );
+        self.clear_baseline();
+        result
+    }
+
+    fn checked_viewport(
+        &mut self,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+    ) -> Option<ViewportFrame> {
+        if self.paused {
+            return None;
+        }
+        let config = match self.panel.as_ref()?.viewport_config(PANEL_SIZE) {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                self.clear_baseline();
+                return None;
+            }
+            Err(error) => {
+                log(&format!("draw: {error}"));
+                self.clear_baseline();
+                return None;
+            }
+        };
+        let transform = ViewportTransform::new(PANEL_SIZE, turn, config.rotation)?;
+        (transform.logical_size() == logical_size).then_some(ViewportFrame { transform, config })
+    }
+
+    fn viewport_update(&self, view: ViewportFrame, frame: &[u8], full: bool) -> FrameUpdate {
+        frame_update(
+            &self.last,
+            frame,
+            W,
+            full || self.viewport_baseline != Some(view),
+        )
+    }
+
+    fn clear_baseline(&mut self) {
+        self.last.clear();
+        self.viewport_baseline = None;
+    }
+
+    fn leave_viewport(&mut self) {
+        if self.viewport_baseline.is_some() {
+            self.clear_baseline();
+        }
+    }
+
+    fn present_packed(
+        &mut self,
+        frame: Vec<u8>,
+        update: FrameUpdate,
+        fb_turn: u32,
+        config: Option<PanelConfig>,
+    ) -> bool {
         let Some(panel) = self.panel.as_mut() else {
             self.last = frame;
             return false;
         };
         let t = Instant::now();
-        let result = if full || self.last.len() != frame.len() {
-            panel.draw(W, (0, 0, W, H), &frame, eink::WAVE_GC16, true).map(|ok| (ok, "GC16 full", (0, 0, W, H)))
-        } else if let Some((x, y, w, h)) = kl_render::changed_rect(&self.last, &frame, W as usize) {
-            let region = (x as u32, y as u32, w as u32, h as u32);
-            let wave = region_wave(&frame, region);
-            let name = if wave == eink::WAVE_DU { "DU" } else { "AUTO" };
-            panel.draw(W, region, &frame, wave, false).map(|ok| (ok, name, region))
-        } else {
-            Ok((true, "unchanged", (0, 0, 0, 0)))
+        let plan = match update {
+            FrameUpdate::Full => Some(((0, 0, W, H), eink::WAVE_GC16, "GC16 full", true)),
+            FrameUpdate::Partial(region) => {
+                let wave = region_wave(&frame, region);
+                let name = if wave == eink::WAVE_DU { "DU" } else { "AUTO" };
+                Some((region, wave, name, false))
+            }
+            FrameUpdate::Unchanged => None,
+        };
+        let result = match plan {
+            Some((region, wave, name, full)) => {
+                let wrote = match config {
+                    Some(expected) => panel.draw_view(expected, region, &frame, wave, full),
+                    None => panel.draw(W, region, &frame, wave, full),
+                };
+                wrote.map(|ok| (ok, name, region))
+            }
+            None => match config {
+                Some(expected) => panel.matches_viewport(expected),
+                None => Ok(true),
+            }
+            .map(|ok| (ok, "unchanged", (0, 0, 0, 0))),
         };
         match result {
             Ok((true, wave, (x, y, w, h))) => {
                 self.presented_frame |= w > 0 && h > 0;
                 self.last = frame;
-                log(&format!("draw {wave} {w}x{h} at {x},{y} in {} ms (fb turn {fb_turn})", t.elapsed().as_millis()));
+                log(&format!(
+                    "draw {wave} {w}x{h} at {x},{y} in {} ms (fb turn {fb_turn})",
+                    t.elapsed().as_millis()
+                ));
                 self.presented_frame
             }
             Ok((false, ..)) => {
-                self.last.clear();
+                self.clear_baseline();
                 log("draw: the framebuffer is not in a drawable state");
                 false
             }
             Err(e) => {
-                self.last.clear();
+                self.clear_baseline();
                 log(&format!("draw: {e}"));
                 false
             }
@@ -148,6 +308,7 @@ impl Display {
 
     /// Present a calm full-screen frame and report whether the panel accepted it.
     pub fn present_calm(&mut self, upright: Vec<u8>, settings: &Settings) -> bool {
+        self.leave_viewport();
         let fb_turn = self.fb_turn();
         let frame = kl_render::for_panel(upright, settings.rotation, fb_turn);
         let Some(panel) = self.panel.as_mut() else {
@@ -184,7 +345,7 @@ impl Display {
         let fb_turn = self.fb_turn();
         let turned = (settings.rotation.turn() + fb_turn) % 4 == 2;
         let frame = kl_render::for_panel(upright, settings.rotation, fb_turn);
-        self.last.clear();
+        self.clear_baseline();
         let Some(panel) = self.panel.as_mut() else { return };
         // Upside down, the area sits at the opposite corner of the panel.
         let (x, y) = if turned { (W as i32 - area.right(), H as i32 - area.bottom()) } else { (area.x, area.y) };
@@ -200,6 +361,12 @@ impl Display {
             log(&format!("draw: {e}"));
         }
     }
+}
+
+fn aligned_region(rect: Rect, panel_width: u32) -> Region {
+    let left = rect.x as u32 / 8 * 8;
+    let right = (rect.right() as u32).div_ceil(8) * 8;
+    (left, rect.y as u32, right.min(panel_width) - left, rect.h as u32)
 }
 
 /// A restore of this box needs no flash: it is at most 60% of the screen (a pop-up, not the sleep picture).
@@ -218,6 +385,7 @@ fn region_wave(frame: &[u8], (x, y, w, h): (u32, u32, u32, u32)) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Mapping, VarInfo};
 
     #[test]
     fn a_pop_up_is_put_back_calmly_and_the_whole_screen_with_a_flash() {
@@ -234,5 +402,131 @@ mod tests {
         frame[W as usize + 8] = 128;
         assert_eq!(region_wave(&frame, (8, 0, 8, 2)), eink::WAVE_AUTO);
     }
-}
 
+    fn view(turn: LogicalTurn, rotation: u32, yoffset: u32) -> ViewportFrame {
+        let mapping = Mapping {
+            start: 0,
+            len: (W + 16) as usize * (H + 8) as usize,
+            pitch: (W + 16) as usize,
+        };
+        let var = VarInfo {
+            xres: W,
+            yres: H,
+            bits_per_pixel: 8,
+            rotate: rotation,
+            yoffset,
+            ..VarInfo::default()
+        };
+        ViewportFrame {
+            transform: ViewportTransform::new(PANEL_SIZE, turn, rotation).unwrap(),
+            config: PanelConfig::new(var, mapping, mapping, PANEL_SIZE).unwrap(),
+        }
+    }
+
+    #[test]
+    fn opting_in_to_a_portrait_turn_projects_the_same_pixels_as_the_legacy_path() {
+        let pixels: Vec<u8> = (0..15).collect();
+        for rotation in [kl_core::Rotation::Upright, kl_core::Rotation::UpsideDown] {
+            for firmware in [0, 2] {
+                let viewport = ViewportTransform::new((3, 5), rotation.into(), firmware).unwrap();
+                let view = viewport.project(pixels.clone()).unwrap();
+                let legacy = kl_render::for_panel(pixels.clone(), rotation, firmware);
+                assert_eq!(view, legacy);
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_or_changing_the_framebuffer_discards_an_equal_pixel_baseline() {
+        let original = view(LogicalTurn::Clockwise, 0, 0);
+        let packed = vec![255; W as usize * H as usize];
+        let mut display = Display {
+            panel: None,
+            last: packed.clone(),
+            viewport_baseline: Some(original),
+            presented_frame: true,
+            paused: false,
+        };
+        assert_eq!(
+            display.viewport_update(original, &packed, false),
+            FrameUpdate::Unchanged
+        );
+        assert_eq!(
+            display.viewport_update(original, &packed, true),
+            FrameUpdate::Full
+        );
+        for different in [
+            view(LogicalTurn::Upright, 0, 0),
+            view(LogicalTurn::Counterclockwise, 0, 0),
+            view(LogicalTurn::Clockwise, 2, 0),
+            view(LogicalTurn::Clockwise, 0, 1),
+        ] {
+            assert_eq!(
+                display.viewport_update(different, &packed, false),
+                FrameUpdate::Full
+            );
+        }
+
+        display.leave_viewport();
+        assert!(display.last.is_empty());
+        assert_eq!(
+            display.viewport_update(original, &packed, false),
+            FrameUpdate::Full
+        );
+        display.set_paused(true);
+        assert!(!display.present_view(packed, (H, W), LogicalTurn::Clockwise, false));
+        assert!(display.viewport_baseline.is_none());
+    }
+
+    #[test]
+    fn clipped_landscape_dirty_rect_has_exact_physical_columns_and_padded_runs() {
+        const WIDTH: u32 = 21;
+        const HEIGHT: u32 = 23;
+        const PITCH: usize = 32;
+        let var = VarInfo {
+            xres: WIDTH,
+            yres: HEIGHT,
+            bits_per_pixel: 8,
+            yoffset: 2,
+            ..VarInfo::default()
+        };
+        let mapping = Mapping {
+            start: 0,
+            len: PITCH * 28,
+            pitch: PITCH,
+        };
+        let config = PanelConfig::new(var, mapping, mapping, (WIDTH, HEIGHT)).unwrap();
+        let transform = ViewportTransform::new((WIDTH, HEIGHT), LogicalTurn::Clockwise, 0).unwrap();
+        let before = vec![255; (WIDTH * HEIGHT) as usize];
+        let mut logical = before.clone();
+        for row in logical.chunks_exact_mut(HEIGHT as usize).skip(17).take(4) {
+            row[..3].fill(0);
+        }
+        let packed = transform.project(logical).unwrap();
+
+        let clip = transform.panel_rect(Rect::new(-2, 17, 5, 9)).unwrap();
+        assert_eq!(clip, Rect::new(17, 20, 4, 3));
+        let region = aligned_region(clip, WIDTH);
+        assert_eq!(region, (16, 20, 5, 3));
+        assert_eq!(
+            frame_update(&before, &packed, WIDTH, false),
+            FrameUpdate::Partial(region)
+        );
+
+        let mut mapped = vec![127; mapping.len];
+        for (source, destination) in config
+            .rows
+            .runs(region, packed.len(), mapped.len())
+            .unwrap()
+        {
+            let row = &packed[source];
+            mapped[destination..destination + row.len()].copy_from_slice(row);
+        }
+        let mut expected = vec![127; mapping.len];
+        for row in 22..25 {
+            expected[row * PITCH + 16] = 255;
+            expected[row * PITCH + 17..row * PITCH + 21].fill(0);
+        }
+        assert_eq!(mapped, expected);
+    }
+}
