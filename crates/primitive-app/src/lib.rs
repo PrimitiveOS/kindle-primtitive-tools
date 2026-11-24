@@ -46,16 +46,17 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kl_core::{Settings, storage_lease::user_storage_is_mounted};
+use kl_core::{storage_lease::user_storage_is_mounted, Settings};
 use kl_kindle::{device, display::Display, profile};
 use primitive_input as input;
-use primitive_ui::{Canvas, Input, full_screen_message};
+use primitive_ui::{full_screen_message, Canvas, Input};
 
 mod orientation;
 mod storage;
 pub mod viewport;
 
 use orientation::{Publisher as TurnPublisher, Turn};
+use viewport::runtime::Session as ViewportSession;
 
 pub use kl_core::Rotation;
 pub use kl_kindle::{
@@ -87,6 +88,33 @@ pub trait App {
     /// Temporarily override the native portrait turn. `None` follows Launcher settings.
     fn preferred_rotation(&self) -> Option<Rotation> {
         None
+    }
+
+    /// Opt in to the negotiated viewport lifecycle. `None` at startup uses
+    /// the portrait lifecycle, including when Launcher offers a viewport.
+    /// Once negotiated, `None` follows Launcher without leaving the protocol.
+    fn viewport_request(&self) -> Option<viewport::ViewportRequest> {
+        None
+    }
+
+    /// Prepare a renderable candidate while retaining the accepted layout.
+    /// The kit calls `finish_viewport` even if staging reports an error.
+    fn stage_viewport(&mut self, _candidate: viewport::Viewport) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Draw the prepared layout into a canvas sized to the candidate.
+    fn draw_staged_viewport(&mut self, canvas: &mut Canvas) {
+        self.draw(canvas);
+    }
+
+    /// Adopt a verified candidate or discard its staged state. Commit cannot
+    /// fail, because the presented frame already belongs to the candidate.
+    fn finish_viewport(
+        &mut self,
+        _candidate: viewport::Viewport,
+        _decision: viewport::ViewportDecision,
+    ) {
     }
 
     /// Override the inherited interface colors. Pictures retain their original shades. Under Primitive Launcher the
@@ -260,7 +288,11 @@ fn persist(app: &mut impl App, on_save_error: impl FnOnce(io::Error)) {
 pub fn frame(app: &impl App, canvas: &mut Canvas, dark: bool) -> Vec<u8> {
     canvas.begin();
     app.draw(canvas);
-    canvas.finish(effective_dark(app.preferred_dark_mode(), dark, UNDER_LAUNCHER.load(Ordering::Relaxed)))
+    canvas.finish(effective_dark(
+        app.preferred_dark_mode(),
+        dark,
+        UNDER_LAUNCHER.load(Ordering::Relaxed),
+    ))
 }
 
 /// Under Primitive Launcher the theme is the system's (`docs/system-architecture.md` §4.2 in the umbrella repo): an
@@ -366,6 +398,7 @@ fn follow_redraw_signal(events: mpsc::Sender<Event>) {
 
 enum Event {
     Input(Input, Option<f32>),
+    ViewportInput(input::viewport::ViewportEvent),
     Turn(Rotation),
     StorageChanged,
     UsbRedraw,
@@ -400,6 +433,27 @@ fn watch_turn(events: mpsc::Sender<Event>, initial: Rotation) {
     });
 }
 
+fn negotiated_viewport(
+    app: &impl App,
+    run: &Path,
+    offer: Option<PathBuf>,
+) -> io::Result<Option<ViewportSession>> {
+    if offer.is_none() || app.viewport_request().is_none() {
+        return Ok(None);
+    }
+    viewport::ViewportPublisher::new(run, offer)
+        .map(|publisher| publisher.map(ViewportSession::new))
+}
+
+fn log_viewport(result: io::Result<()>) -> bool {
+    if let Err(error) = result {
+        kl_kindle::log(&format!("Viewport: {error}"));
+        false
+    } else {
+        true
+    }
+}
+
 /// Use the shared launcher settings and device driver while foregrounded by the launcher.
 pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     if !cfg!(target_os = "linux") || !Path::new("/dev/fb0").exists() {
@@ -422,7 +476,16 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     };
     let under_launcher = std::env::var("PRIMITIVE_LAUNCHER").as_deref() == Ok("1");
     UNDER_LAUNCHER.store(under_launcher, Ordering::Relaxed);
-    let turn_path = if under_launcher { std::env::var_os("KL_APP_TURN_FILE").map(PathBuf::from) } else { None };
+    let viewport_offer = under_launcher
+        .then(|| std::env::var_os("KL_APP_VIEWPORT_FILE").map(PathBuf::from))
+        .flatten();
+    let mut viewport =
+        negotiated_viewport(&app, &run, viewport_offer).map_err(|error| error.to_string())?;
+    let turn_path = if under_launcher {
+        std::env::var_os("KL_APP_TURN_FILE").map(PathBuf::from)
+    } else {
+        None
+    };
     let mut turn_publisher = TurnPublisher::new(&run, turn_path);
     let mut settings = display_settings(
         &fs::read_to_string(launcher.join("settings.txt")).unwrap_or_default(),
@@ -435,32 +498,47 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     } else {
         launcher.join("fonts")
     };
-    let mut canvas = Canvas::new(WIDTH, HEIGHT, &font_paths(&fonts))?;
+    let fonts = font_paths(&fonts);
+    let mut canvas = Canvas::new(WIDTH, HEIGHT, &fonts)?;
     let mut display = Display::open();
 
     let mut inherited_rotation = inherited_turn(&settings, device::accelerometer_turn);
     let mut turn = Turn::resolve(app.preferred_rotation(), inherited_rotation);
     settings.rotation = turn.rotation;
     let mut dark_override = app.preferred_dark_mode();
-    if !turn_publisher.scoped() {
+    if viewport.is_none() && !turn_publisher.scoped() {
         publish_legacy_rotation(&run, settings.rotation);
     }
     let (tx, rx) = mpsc::channel();
     if let Some(path) = input::find(profile::ACTIVE.touch_name) {
         let events = tx.clone();
+        let generation = viewport.as_ref().map(ViewportSession::input_generation);
         thread::spawn(move || {
-            input::touch_loop_with_origin(path, |input, start_x| {
-                let origin = matches!(input, Input::Swipe { .. }).then_some(start_x);
-                let _ = events.send(Event::Input(input, origin));
-            });
+            if let Some(generation) = generation {
+                input::viewport::viewport_touch_loop(path, &generation, |event| {
+                    let _ = events.send(Event::ViewportInput(event));
+                });
+            } else {
+                input::touch_loop_with_origin(path, |input, start_x| {
+                    let origin = matches!(input, Input::Swipe { .. }).then_some(start_x);
+                    let _ = events.send(Event::Input(input, origin));
+                });
+            }
         });
     }
     if let Some(path) = input::find("gpio-keys") {
         let events = tx.clone();
+        let generation = viewport.as_ref().map(ViewportSession::input_generation);
         thread::spawn(move || {
-            input::button_loop(path, |input| {
-                let _ = events.send(Event::Input(input, None));
-            });
+            if let Some(generation) = generation {
+                input::viewport::viewport_button_loop(path, &generation, |event| {
+                    let _ = events.send(Event::ViewportInput(event));
+                });
+            } else {
+                input::button_loop(path, |input| {
+                    let _ = events.send(Event::Input(input, None));
+                });
+            }
         });
     }
     {
@@ -474,16 +552,28 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     let mut dormant_turn_watch = None;
     if settings.auto_rotation {
         watch_turn(tx.clone(), inherited_rotation);
-    } else if turn_publisher.scoped() {
+    } else if turn_publisher.scoped() || viewport.is_some() {
         dormant_turn_watch = Some(tx.clone());
     }
     log("Opened");
-    let presented = display.present(
-        frame(&app, &mut canvas, settings.dark_mode),
-        &settings,
-        true,
-    );
-    publish_presented_turn(&mut turn_publisher, turn, presented);
+    if let Some(viewport) = &mut viewport {
+        log_viewport(viewport.render_app(
+            &mut app,
+            &mut canvas,
+            &mut display,
+            &fonts,
+            settings.dark_mode,
+            inherited_rotation,
+            Some(true),
+        ));
+    } else {
+        let presented = display.present(
+            frame(&app, &mut canvas, settings.dark_mode),
+            &settings,
+            true,
+        );
+        publish_presented_turn(&mut turn_publisher, turn, presented);
+    }
 
     // A fallback font source may map a file from user storage, so keep the startup pause in that case.
     let managed_storage = fonts_in_ram
@@ -505,7 +595,12 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
     let mut lifecycle = Lifecycle::default();
     let on_save_error = |error| kl_kindle::log(&format!("Could not save: {error}"));
     loop {
-        let event = match lifecycle.deadline(&app) {
+        let app_deadline = lifecycle.deadline(&app);
+        let viewport_deadline = viewport
+            .as_ref()
+            .filter(|_| lifecycle.is_awake())
+            .and_then(|viewport| viewport.deadline(lifecycle.usb_drive));
+        let event = match app_deadline.into_iter().chain(viewport_deadline).min() {
             Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
@@ -513,15 +608,18 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         // before handling what woke the loop, and draw the whole screen once.
         let mut redraw_now = false;
         if under_launcher && REDRAW.swap(false, Ordering::Relaxed) {
+            if let Some(viewport) = &mut viewport {
+                viewport.invalidate();
+            }
             let launcher_settings = fs::read_to_string(launcher.join("settings.txt"));
             // Retain the last known Launcher settings while drive mode unmounts Documents.
-            if launcher_settings.is_ok() || !turn_publisher.scoped() {
+            if launcher_settings.is_ok() || !(turn_publisher.scoped() || viewport.is_some()) {
                 let fresh = display_settings(
                     &launcher_settings.unwrap_or_default(),
                     &fs::read_to_string(app_dir.join("settings.txt")).unwrap_or_default(),
                 );
                 settings.dark_mode = fresh.dark_mode;
-                if turn_publisher.scoped() {
+                if turn_publisher.scoped() || viewport.is_some() {
                     settings.auto_rotation = fresh.auto_rotation;
                     inherited_rotation = inherited_turn(&fresh, device::accelerometer_turn);
                     if settings.auto_rotation {
@@ -541,23 +639,54 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         }
         let usb_drive = managed_storage && !user_storage_is_mounted();
         let usb_changed = lifecycle.set_usb_drive(usb_drive);
+        if usb_changed {
+            if let Some(viewport) = &mut viewport {
+                viewport.invalidate();
+            }
+        }
         let usb_redraw = matches!(event, Ok(Event::UsbRedraw));
+        let event = event.map(|event| match event {
+            Event::ViewportInput(raw) => viewport
+                .as_mut()
+                .and_then(|viewport| viewport.resolve(raw, &display))
+                .map_or(Event::Redraw, |resolved| {
+                    Event::Input(resolved.input, resolved.touch_origin.map(|(x, _)| x))
+                }),
+            event => event,
+        });
+        let was_awake = lifecycle.is_awake();
         let mut pressed = false;
         let mut change = match event {
             Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) if !usb_drive => app.tick(Instant::now()),
+            Err(RecvTimeoutError::Timeout)
+                if !usb_drive
+                    && (viewport.is_none()
+                        || app_deadline.is_some_and(|deadline| deadline <= Instant::now())) =>
+            {
+                app.tick(Instant::now())
+            }
             // The swipe down from the top edge is the system's (quick settings) under the launcher, not the app's.
             Ok(Event::Input(input, _)) if under_launcher && is_system_swipe(input) => Change::None,
             Ok(Event::Input(input, start_x)) => {
-                if !usb_changed && !turn_publisher.needs_frame(turn) {
+                let mut feedback_ok = true;
+                if !usb_changed && (viewport.is_some() || !turn_publisher.needs_frame(turn)) {
                     if let Some(image) =
                         lifecycle.press_feedback(&app, &mut canvas, input, settings.dark_mode)
                     {
-                        display.show(image, &settings, false);
-                        pressed = true;
+                        if let Some(viewport) = &mut viewport {
+                            feedback_ok =
+                                log_viewport(viewport.present_current(&mut display, image, false));
+                        } else {
+                            display.show(image, &settings, false);
+                        }
+                        pressed = feedback_ok;
                     }
                 }
-                let change = lifecycle.dispatch_input(&mut app, input, start_x, on_save_error);
+                let change = if feedback_ok {
+                    lifecycle.dispatch_input(&mut app, input, start_x, on_save_error)
+                } else {
+                    Change::None
+                };
                 // Under the launcher the screen is put back after the sleep picture: the app redraws on wake only
                 // when a redraw was asked for while it slept.
                 if under_launcher && input == Input::Wake && change == Change::Full {
@@ -577,6 +706,11 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         if redraw_now && change != Change::Exit {
             change = Change::Full;
         }
+        if was_awake && !lifecycle.is_awake() {
+            if let Some(viewport) = &mut viewport {
+                viewport.invalidate();
+            }
+        }
         if usb_changed && !usb_drive {
             match app.storage_returned() {
                 Ok(()) if storage::pending_save() => persist(&mut app, on_save_error),
@@ -584,7 +718,7 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
                 Err(error) => kl_kindle::log(&format!("Could not reload Kindle storage: {error}")),
             }
         }
-        if change != Change::Exit {
+        if change != Change::Exit && viewport.is_none() {
             turn = Turn::resolve(app.preferred_rotation(), inherited_rotation);
             let old_rotation = settings.rotation;
             if turn.rotation != old_rotation {
@@ -604,7 +738,12 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
             dark_override = preferred_dark;
         }
         if usb_drive {
-            if lifecycle.is_awake() && (usb_changed || usb_redraw || change == Change::Full) {
+            if lifecycle.is_awake()
+                && (usb_changed
+                    || usb_redraw
+                    || change == Change::Full
+                    || viewport.as_ref().is_some_and(ViewportSession::retry_due))
+            {
                 let image = canvas.usb_drive_frame().unwrap_or_else(|| {
                     canvas.begin();
                     full_screen_message(
@@ -614,8 +753,12 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
                     );
                     canvas.finish(settings.dark_mode)
                 });
-                let presented = display.present(image, &settings, true);
-                publish_presented_turn(&mut turn_publisher, turn, presented);
+                if let Some(viewport) = &mut viewport {
+                    log_viewport(viewport.present_current(&mut display, image, true));
+                } else {
+                    let presented = display.present(image, &settings, true);
+                    publish_presented_turn(&mut turn_publisher, turn, presented);
+                }
             }
             continue;
         }
@@ -624,6 +767,25 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         } else {
             change
         };
+        if let Some(viewport) = &mut viewport {
+            if change == Change::Exit {
+                break;
+            }
+            if lifecycle.is_awake() {
+                let redraw = (change != Change::None || pressed)
+                    .then_some(change == Change::Full && !redraw_now);
+                log_viewport(viewport.render_app(
+                    &mut app,
+                    &mut canvas,
+                    &mut display,
+                    &fonts,
+                    settings.dark_mode,
+                    inherited_rotation,
+                    redraw,
+                ));
+            }
+            continue;
+        }
         match change {
             Change::None if !pressed => {}
             Change::Exit => break,
@@ -671,6 +833,31 @@ fn watch_usb(events: mpsc::Sender<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_absent_offer_never_queries_or_stages_viewport_support() {
+        struct AppWithViewport;
+        impl App for AppWithViewport {
+            fn draw(&self, _: &mut Canvas) {}
+            fn input(&mut self, _: Input) -> Change {
+                Change::None
+            }
+            fn viewport_request(&self) -> Option<viewport::ViewportRequest> {
+                panic!("an absent offer cannot enable the viewport lifecycle")
+            }
+        }
+        let run = Path::new("/var/tmp/kl");
+        assert!(negotiated_viewport(&AppWithViewport, run, None)
+            .unwrap()
+            .is_none());
+        assert!(negotiated_viewport(
+            &Demo::default(),
+            run,
+            Some(run.join("app-turn.ABC123/viewport"))
+        )
+        .unwrap()
+        .is_none());
+    }
 
     #[test]
     fn the_system_swipe_is_down_from_the_top_edge_only() {

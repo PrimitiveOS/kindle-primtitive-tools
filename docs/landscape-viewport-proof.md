@@ -183,9 +183,40 @@ For the consuming Launcher:
    viewport or owner changes. Restore exact native pixels only while their
    geometry still matches, or request an app redraw through the publisher.
 
-These APIs supply the protocol and display transaction. Supervisor offers,
-Launcher capture and restore, Reader layout preparation, application-level
-storage handling and physical e-ink acceptance are still integration work.
+`primitive_app::run` negotiates once at startup, when Launcher provides a
+valid offer and the app returns a viewport request. Without an offer or an
+opted-in app, the kit uses the existing portrait lifecycle. The v2 app can
+follow the inherited portrait turn or request a fixed logical quarter turn.
+The request can change after input or a timer. Returning `None` after
+negotiation follows the Launcher while retaining the v2 protocol.
+
+The app implements `viewport_request`, `stage_viewport`,
+`draw_staged_viewport`, and `finish_viewport`. Staging keeps the current
+layout, frame and saved source state available. The kit creates a canvas
+for the proposed dimensions and calls the mutable draw hook for the staged
+layout. It sends `Commit` to adopt the candidate after the publisher returns
+its verified ready record. `Abort` discards staged resources, including
+when staging returned an error. The app may reuse its existing render path
+inside the staged draw and restores its accepted state before returning.
+
+A rejected candidate may have reached part of the panel. The kit parks
+input before exposure and, when an accepted layout exists, draws that
+layout through the publisher with a newer generation. It retries failed
+presentations on a bounded timer while awake. The app's accepted layout
+stays in memory through recovery. Frame generations identify committed
+presentations and are independent of persisted reading positions. Native
+contacts received during the handoff, contacts from older generations,
+and events whose live framebuffer no longer matches the accepted readback
+cannot enter the app. Sleep, Launcher redraw signals, and USB changes
+invalidate queued native events. The USB message and pressed control
+frames use the same scoped publisher as ordinary app frames.
+
+The host fake-app tests use the shared Noto Sans fonts. Run
+`KL_TEST_FONTS=/path/to/NotoSans/fonts cargo test -p primitive-app -- --include-ignored`
+to check staging at new dimensions, old and in-flight input rejection,
+partial exposure recovery and a live readback mismatch. The Launcher
+offer and Reader integration, and physical e-ink acceptance, remain
+separate from the host checks.
 [Wire parser and observer](../crates/kl-kindle/src/viewport.rs) ·
 [Opt-in publisher](../crates/primitive-app/src/viewport.rs)
 

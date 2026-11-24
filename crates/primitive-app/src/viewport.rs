@@ -10,16 +10,38 @@ use kl_core::viewport::ViewportTransform;
 use kl_kindle::{
     display::Display,
     profile,
-    viewport::{
-        live_viewport_owner, valid_viewport_offer, FramebufferGeometry, ReadyViewport,
-        ViewportOwner, ViewportRecord,
-    },
+    viewport::{live_viewport_owner, valid_viewport_offer, ViewportOwner, ViewportRecord},
 };
 
 use crate::write_atomic;
 
 pub use kl_core::viewport::LogicalTurn;
-pub use kl_kindle::viewport::Viewport;
+pub use kl_kindle::viewport::{FramebufferGeometry, ReadyViewport, Viewport};
+
+pub(super) mod runtime;
+
+/// A negotiated app can follow the inherited portrait turn or fix any
+/// logical direction. The portrait hooks are used with an older Launcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportRequest {
+    FollowLauncher,
+    Fixed(LogicalTurn),
+}
+
+impl ViewportRequest {
+    pub(super) fn turn(self, inherited: crate::Rotation) -> LogicalTurn {
+        match self {
+            Self::FollowLauncher => inherited.into(),
+            Self::Fixed(turn) => turn,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportDecision {
+    Commit,
+    Abort,
+}
 
 const NATIVE_SIZE: (u32, u32) = (profile::ACTIVE.screen_w, profile::ACTIVE.screen_h);
 static PUBLISHING: Mutex<()> = Mutex::new(());
@@ -62,13 +84,24 @@ impl ViewportPublisher {
         pixels: Vec<u8>,
         full: bool,
     ) -> io::Result<bool> {
-        self.present_with(viewport, Path::new("/proc"), std::process::id(), || {
+        self.present_ready(display, viewport, pixels, full)
+            .map(|ready| ready.is_some())
+    }
+
+    /// Return the exact ready record that was written after framebuffer readback.
+    pub fn present_ready(
+        &mut self,
+        display: &mut Display,
+        viewport: Viewport,
+        pixels: Vec<u8>,
+        full: bool,
+    ) -> io::Result<Option<ReadyViewport>> {
+        self.present_record_with(viewport, Path::new("/proc"), std::process::id(), || {
             display.present_view_verified(pixels, viewport.logical_size, viewport.turn, full)
         })
     }
 
-    // Only the public method supplies the display result in production. Tests
-    // drive the transaction timing without opening a framebuffer or using signals.
+    #[cfg(test)]
     fn present_with(
         &mut self,
         viewport: Viewport,
@@ -76,6 +109,19 @@ impl ViewportPublisher {
         pid: u32,
         draw: impl FnOnce() -> Option<FramebufferGeometry>,
     ) -> io::Result<bool> {
+        self.present_record_with(viewport, procfs, pid, draw)
+            .map(|ready| ready.is_some())
+    }
+
+    // The public method supplies the display readback. Tests can drive the
+    // pending/ready transaction without opening a framebuffer.
+    fn present_record_with(
+        &mut self,
+        viewport: Viewport,
+        procfs: &Path,
+        pid: u32,
+        draw: impl FnOnce() -> Option<FramebufferGeometry>,
+    ) -> io::Result<Option<ReadyViewport>> {
         if !ViewportTransform::new(NATIVE_SIZE, viewport.turn, 0)
             .is_some_and(|transform| transform.logical_size() == viewport.logical_size)
         {
@@ -118,21 +164,24 @@ impl ViewportPublisher {
             return Err(owner_changed());
         }
         let Some(framebuffer) = draw() else {
-            return Ok(false);
+            return Ok(None);
         };
         if framebuffer.native_size != NATIVE_SIZE || !viewport.matches(framebuffer) {
-            return Ok(false);
+            return Ok(None);
         }
         if self.owner(procfs, pid)? != owner {
             return Err(owner_changed());
         }
-        let ready = ViewportRecord::Ready(ReadyViewport {
+        let ready = ReadyViewport {
             owner,
             viewport,
             framebuffer,
-        });
-        write_atomic(&self.path, ready.encode().as_bytes())?;
-        Ok(true)
+        };
+        write_atomic(
+            &self.path,
+            ViewportRecord::Ready(ready.clone()).encode().as_bytes(),
+        )?;
+        Ok(Some(ready))
     }
 
     fn owner(&self, procfs: &Path, pid: u32) -> io::Result<ViewportOwner> {
