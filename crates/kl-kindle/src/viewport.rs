@@ -48,6 +48,10 @@ impl ViewportOwner {
         })
     }
 
+    pub fn read(path: &Path) -> Option<Self> {
+        Self::parse(&read_bounded(path, MAX_RECORD)?)
+    }
+
     pub fn viewport_path(&self, run: &Path) -> PathBuf {
         run.join(&self.scope).join("viewport")
     }
@@ -270,7 +274,7 @@ pub struct LiveViewportOwner {
 }
 
 pub fn live_viewport_owner(run: &Path, procfs: &Path) -> Option<LiveViewportOwner> {
-    let owner = ViewportOwner::parse(&read_bounded(&run.join("app-turn-owner"), MAX_RECORD)?)?;
+    let owner = ViewportOwner::read(&run.join("app-turn-owner"))?;
     let registered: u32 = decimal(read_bounded(&run.join("app.pid"), 32)?.trim())?;
     if registered != owner.pid {
         return None;

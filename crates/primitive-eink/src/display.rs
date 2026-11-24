@@ -106,6 +106,33 @@ impl Display {
         self.panel.as_ref()?.snapshot_viewport(expected)
     }
 
+    /// Restore packed native pixels only to the framebuffer from which they came.
+    pub fn restore_viewport(&mut self, expected: FramebufferGeometry, frame: Vec<u8>) -> bool {
+        if expected.native_size != PANEL_SIZE || frame.len() != W as usize * H as usize {
+            return false;
+        }
+        let Some(panel) = self.panel.as_ref() else { return false };
+        let Ok(Some(config)) = panel.viewport_config(PANEL_SIZE) else { return false };
+        if config.geometry() != expected {
+            return false;
+        }
+        let Some(current) = panel.snapshot_viewport(expected) else { return false };
+        let update = match frame_update(&current, &frame, W, false) {
+            FrameUpdate::Partial(region) if !restores_calmly(region) => FrameUpdate::Full,
+            FrameUpdate::Unchanged => {
+                let restored = panel.matches_viewport(config).unwrap_or(false);
+                if restored {
+                    self.clear_baseline();
+                }
+                return restored;
+            }
+            update => update,
+        };
+        let restored = self.present_packed(frame, update, config.rotation, Some(config));
+        self.clear_baseline();
+        restored
+    }
+
     /// Put a snapshot back (it draws even while paused). Only the box that differs from what is on the panel is
     /// updated, without a flash, when it is a pop-up's size (quick settings closing over an app). A change over most
     /// of the screen (the sleep picture going) gets one full update, as a calm update there leaves a ghost.
@@ -228,9 +255,35 @@ impl Display {
         turn: LogicalTurn,
         area: Rect,
     ) -> bool {
+        self.present_view_region_inner(pixels, logical_size, turn, area, None)
+    }
+
+    /// Draw an overlay region only while its captured framebuffer still matches.
+    pub fn present_view_region_matching(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        area: Rect,
+        expected: FramebufferGeometry,
+    ) -> bool {
+        self.present_view_region_inner(pixels, logical_size, turn, area, Some(expected))
+    }
+
+    fn present_view_region_inner(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        area: Rect,
+        expected: Option<FramebufferGeometry>,
+    ) -> bool {
         let Some(view) = self.checked_viewport(logical_size, turn) else {
             return false;
         };
+        if expected.is_some_and(|geometry| geometry != view.config.geometry()) {
+            return false;
+        }
         let Some(rect) = view.transform.panel_rect(area) else {
             return false;
         };
