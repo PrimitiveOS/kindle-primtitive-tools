@@ -9,7 +9,7 @@ use kl_core::{
 
 use primitive_device::{log, profile};
 
-use crate::{self as eink, PanelConfig, Region};
+use crate::{self as eink, FramebufferGeometry, PanelConfig, Region};
 
 const W: u32 = profile::ACTIVE.screen_w;
 const H: u32 = profile::ACTIVE.screen_h;
@@ -86,6 +86,26 @@ impl Display {
         self.panel.as_ref()?.snapshot(W, H)
     }
 
+    /// The geometry of the current supported native framebuffer.
+    pub fn viewport_framebuffer(&self) -> Option<FramebufferGeometry> {
+        Some(
+            self.panel
+                .as_ref()?
+                .viewport_config(PANEL_SIZE)
+                .ok()??
+                .geometry(),
+        )
+    }
+
+    /// Capture packed native rows only when the observed framebuffer still matches.
+    /// The caller must stop the foreground writer before relying on this snapshot.
+    pub fn snapshot_viewport(&self, expected: FramebufferGeometry) -> Option<Vec<u8>> {
+        if expected.native_size != PANEL_SIZE {
+            return None;
+        }
+        self.panel.as_ref()?.snapshot_viewport(expected)
+    }
+
     /// Put a snapshot back (it draws even while paused). Only the box that differs from what is on the panel is
     /// updated, without a flash, when it is a pop-up's size (quick settings closing over an app). A change over most
     /// of the screen (the sleep picture going) gets one full update, as a calm update there leaves a ghost.
@@ -155,16 +175,47 @@ impl Display {
         turn: LogicalTurn,
         full: bool,
     ) -> bool {
-        let Some(view) = self.checked_viewport(logical_size, turn) else {
-            return false;
-        };
-        let Some(frame) = view.transform.project(pixels) else {
-            return false;
-        };
+        self.present_view_inner(pixels, logical_size, turn, full, false)
+            .is_some()
+    }
+
+    /// Present a logical frame and report its measured framebuffer geometry.
+    /// The geometry is rechecked after presentation before it may be advertised.
+    pub fn present_view_verified(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        full: bool,
+    ) -> Option<FramebufferGeometry> {
+        self.present_view_inner(pixels, logical_size, turn, full, true)
+    }
+
+    fn present_view_inner(
+        &mut self,
+        pixels: Vec<u8>,
+        logical_size: (u32, u32),
+        turn: LogicalTurn,
+        full: bool,
+        verify_after: bool,
+    ) -> Option<FramebufferGeometry> {
+        let view = self.checked_viewport(logical_size, turn)?;
+        let frame = view.transform.project(pixels)?;
         let update = self.viewport_update(view, &frame, full);
-        let presented = self.present_packed(frame, update, view.config.rotation, Some(view.config));
-        self.viewport_baseline = presented.then_some(view);
-        presented
+        if !self.present_packed(frame, update, view.config.rotation, Some(view.config)) {
+            return None;
+        }
+        if verify_after
+            && !self
+                .panel
+                .as_ref()
+                .is_some_and(|panel| panel.matches_viewport(view.config).unwrap_or(false))
+        {
+            self.clear_baseline();
+            return None;
+        }
+        self.viewport_baseline = Some(view);
+        Some(view.config.geometry())
     }
 
     /// Present a clipped logical rectangle from a full logical frame. The

@@ -173,6 +173,15 @@ struct FixInfo {
     reserved: [u16; 2],
 }
 
+/// Observed geometry of a supported, mapped portrait framebuffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FramebufferGeometry {
+    pub native_size: (u32, u32),
+    pub turn: u32,
+    pub yoffset: u32,
+    pub pitch: u32,
+}
+
 type Region = (u32, u32, u32, u32);
 
 /// The fixed layout used to establish a panel mapping.
@@ -257,6 +266,16 @@ struct PanelConfig {
 }
 
 impl PanelConfig {
+    fn geometry(self) -> FramebufferGeometry {
+        FramebufferGeometry {
+            native_size: (self.rows.width, self.rows.height),
+            turn: self.rotation,
+            // Offset is built from a kernel u32 row offset and this pitch.
+            yoffset: (self.rows.offset / self.rows.pitch) as u32,
+            pitch: self.rows.pitch as u32,
+        }
+    }
+
     fn new(
         var: VarInfo,
         opened: Mapping,
@@ -435,6 +454,28 @@ impl Panel {
 }
 
 impl Panel {
+    fn snapshot_viewport(&self, expected: FramebufferGeometry) -> Option<Vec<u8>> {
+        let config = self.viewport_config(expected.native_size).ok()??;
+        if config.geometry() != expected {
+            return None;
+        }
+        let (width, height) = expected.native_size;
+        let frame_len = (width as usize).checked_mul(height as usize)?;
+        let mut frame = vec![0; frame_len];
+        for (destination, source) in
+            config
+                .rows
+                .runs((0, 0, width, height), frame_len, self.mapping.len)?
+        {
+            let row = &mut frame[destination];
+            // SAFETY: the ranges were checked against the frame and mapping lengths.
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.map.add(source), row.as_mut_ptr(), row.len())
+            };
+        }
+        self.matches_viewport(config).ok()?.then_some(frame)
+    }
+
     /// The visible page as it is in memory (panel orientation), `width` bytes a row for `height` rows: what is on the
     /// screen now, so it can be put back later. `None` when the page does not fit the mapping.
     pub fn snapshot(&self, width: u32, height: u32) -> Option<Vec<u8>> {

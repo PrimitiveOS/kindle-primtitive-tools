@@ -53,6 +53,7 @@ use primitive_ui::{Canvas, Input, full_screen_message};
 
 mod orientation;
 mod storage;
+pub mod viewport;
 
 use orientation::{Publisher as TurnPublisher, Turn};
 

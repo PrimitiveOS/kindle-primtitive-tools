@@ -131,6 +131,64 @@ viewport is ready. Existing portrait callers can continue using `Ev::Input`.
 [Input adapter](../crates/kl-kindle/src/input.rs) ·
 [Native viewport events](../crates/primitive-input/src/viewport.rs)
 
+## Scoped viewport handoff
+
+A Launcher that supports v2 can offer `KL_APP_VIEWPORT_FILE` only to eligible
+runs. It uses the existing `app-turn-owner` supervisor record as the authority,
+with the live PID and its Linux start tick. The per-run viewport path is the
+`viewport` sibling of the v1 `turn` file in `app-turn.<token>/`.
+Eligibility must come from the supervisor. For an offered run, an absent,
+invalid or pending record defers the overlay. The v1 path remains available for
+runs without an offer.
+
+The supervisor must identify the executable that actually presents the frame.
+An app wrapper should exec that executable so its PID and start tick match.
+The app opens `primitive_app::viewport::ViewportPublisher` using the offer.
+Its constructor distinguishes an absent offer from a malformed offer.
+The app presents through the publisher on every scoped write, including initial
+presentation, redraw after resume, and storage transitions. The publisher
+atomically stages pending before writing any pixels and commits ready after
+the display accepts the frame and checks the same geometry again. An error
+can leave the viewport pending even when pixels were written. Retry the same
+generation and layout or present a newer generation through the publisher.
+The supervisor owns retirement of the run record and directory.
+
+The records are one bounded ASCII line. They name the authorized run even
+though the file lives in its scoped directory.
+
+```text
+v2 pending PID START SCOPE GENERATION TURN LOGICAL_W LOGICAL_H
+v2 ready PID START SCOPE GENERATION TURN LOGICAL_W LOGICAL_H NATIVE_W NATIVE_H F YOFFSET PITCH
+```
+
+`TURN` uses `U`, `CW`, `D` or `CCW`. `F` is the measured native framebuffer
+turn, currently 0 or 2. Offset is measured in rows and pitch in bytes. A
+generation identifies one logical viewport. Repeated frames in that viewport
+share its generation. Changes to its logical turn or canvas dimensions must advance it. Follow
+and fixed settings stay with the app.
+
+For the consuming Launcher:
+
+1. Obtain current native geometry from `Display::viewport_framebuffer`, then
+   call `kl_kindle::viewport::read_ready_viewport` for the active run with a
+   minimum generation tracked for that owner. Use the result for preliminary
+   hit testing. Defer when any observation is missing.
+2. Stop the same foreground app and wait for a stopped process state. Read
+   the ready record with `require_stopped` and compare it with the preliminary
+   record. If it changed or became pending, resume the app and defer.
+3. Capture through `Display::snapshot_viewport(ready.framebuffer)`. It
+   verifies the geometry before and after reading packed native rows. Check
+   the frozen owner and ready metadata again before accepting the snapshot.
+4. Advance Launcher's own input generation when its accepted visible
+   viewport or owner changes. Restore exact native pixels only while their
+   geometry still matches, or request an app redraw through the publisher.
+
+These APIs supply the protocol and display transaction. Supervisor offers,
+Launcher capture and restore, Reader layout preparation, application-level
+storage handling and physical e-ink acceptance are still integration work.
+[Wire parser and observer](../crates/kl-kindle/src/viewport.rs) ·
+[Opt-in publisher](../crates/primitive-app/src/viewport.rs)
+
 ## Mac proof
 
 Run from the Tools repository root with readable copies of Noto Sans Regular
