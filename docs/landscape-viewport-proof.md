@@ -199,6 +199,15 @@ its verified ready record. `Abort` discards staged resources, including
 when staging returned an error. The app may reuse its existing render path
 inside the staged draw and restores its accepted state before returning.
 
+Negotiated app canvases use `Canvas::new_viewport(width, height, panel_short_edge, fonts)`.
+The logical bounds follow the requested turn. `Canvas::px` uses the same
+physical panel width in either orientation, so shared text, borders and
+corner radii retain their physical size. The ordinary `Canvas::new`
+constructor continues to scale these dimensions by canvas width. A host
+test compares the pixels of a caption and rounded toolbar drawn at
+1264 × 1680 and 1680 × 1264. [Portrait toolbar and caption](screenshots/viewport-chrome-portrait.png) ·
+[Landscape toolbar and caption](screenshots/viewport-chrome-landscape.png)
+
 A rejected candidate may have reached part of the panel. The kit parks
 input before exposure and, when an accepted layout exists, draws that
 layout through the publisher with a newer generation. It retries failed
@@ -217,6 +226,7 @@ to check staging at new dimensions, old and in-flight input rejection,
 partial exposure recovery and a live readback mismatch. The Launcher
 offer and Reader integration, and physical e-ink acceptance, remain
 separate from the host checks.
+[Canvas raster verifier](../crates/kl-render/src/component.rs)
 [Wire parser and observer](../crates/kl-kindle/src/viewport.rs) ·
 [Opt-in publisher](../crates/primitive-app/src/viewport.rs)
 

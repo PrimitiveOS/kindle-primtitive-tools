@@ -214,7 +214,9 @@ impl Runtime {
     ) -> io::Result<()> {
         let candidate = self.candidate(turn);
         let (width, height) = candidate.logical_size;
-        let mut staged = Canvas::new(width, height, fonts).map_err(io::Error::other)?;
+        let mut staged =
+            Canvas::new_viewport(width, height, NATIVE_SIZE.0.min(NATIVE_SIZE.1), fonts)
+                .map_err(io::Error::other)?;
         if let Err(error) = app.stage_viewport(candidate) {
             app.finish_viewport(candidate, ViewportDecision::Abort);
             return Err(error);
@@ -333,6 +335,8 @@ mod tests {
         }
         fn draw_staged_viewport(&mut self, canvas: &mut Canvas) {
             assert_eq!(self.staged.unwrap().logical_size, size(canvas));
+            let expected = (28.0 * f64::from(NATIVE_SIZE.0.min(NATIVE_SIZE.1)) / 1264.0).round();
+            assert_eq!(canvas.px(28), expected as i32);
             canvas.fill(
                 kl_core::Rect::new(canvas.bounds().w - 30, 4, 20, 10),
                 primitive_ui::BLACK,

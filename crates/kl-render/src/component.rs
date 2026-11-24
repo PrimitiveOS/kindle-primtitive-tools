@@ -38,6 +38,7 @@ pub enum Align {
 pub struct Canvas {
     renderer: Renderer,
     bounds: Rect,
+    scaling_width: u32,
     pictures: Vec<Picture>,
     popup_covers: Vec<(Rect, f32)>,
     touch_regions: Vec<TouchRegion>,
@@ -46,9 +47,33 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new(width: u32, height: u32, fonts: &[String]) -> Result<Self, String> {
+        Self::with_scaling_width(width, height, width, fonts)
+    }
+
+    /// Draw into a logical viewport while sizing shared chrome from the
+    /// native panel's short edge. Pass the same panel edge in all orientations.
+    pub fn new_viewport(
+        width: u32,
+        height: u32,
+        panel_short_edge: u32,
+        fonts: &[String],
+    ) -> Result<Self, String> {
+        if panel_short_edge == 0 {
+            return Err("the viewport panel short edge must be positive".into());
+        }
+        Self::with_scaling_width(width, height, panel_short_edge, fonts)
+    }
+
+    fn with_scaling_width(
+        width: u32,
+        height: u32,
+        scaling_width: u32,
+        fonts: &[String],
+    ) -> Result<Self, String> {
         Ok(Self {
             renderer: Renderer::new(width, height, fonts)?,
             bounds: Rect::new(0, 0, width as i32, height as i32),
+            scaling_width,
             pictures: Vec::new(),
             popup_covers: Vec::new(),
             touch_regions: Vec::new(),
@@ -65,9 +90,10 @@ impl Canvas {
         self.renderer.usb_drive_frame(self.bounds.w as u32, self.bounds.h as u32)
     }
 
-    /// Scale a measurement from the reference width of 1264 pixels.
+    /// Scale a measurement from the reference width of 1264 pixels, using the
+    /// canvas width or the native panel edge selected by the constructor.
     pub fn px(&self, pixels: i32) -> i32 {
-        ((pixels as f64 * f64::from(self.bounds.w)) / 1264.0).round() as i32
+        ((pixels as f64 * f64::from(self.scaling_width)) / 1264.0).round() as i32
     }
 
     pub fn begin(&mut self) {
@@ -564,13 +590,110 @@ impl TextStyle {
 mod tests {
     use super::*;
 
+    fn test_fonts() -> Vec<String> {
+        let paths = std::env::var_os("KL_TEST_FONTS").expect("supply regular and bold Noto Sans");
+        let directory = std::path::Path::new(&paths);
+        if directory.is_dir() {
+            return ["NotoSans-Regular.ttf", "NotoSans-Bold.ttf"]
+                .map(|name| directory.join(name).to_string_lossy().into_owned())
+                .to_vec();
+        }
+        std::env::split_paths(&paths)
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "requires the two Noto Sans static UI font files"]
+    fn viewport_chrome_retains_physical_type_and_rounded_geometry() {
+        let fonts = test_fonts();
+        let caption = "Chapter 17 of 32 - Page 384 of 597";
+        let mut portrait = Canvas::new_viewport(1264, 1680, 1264, &fonts).unwrap();
+        let mut landscape = Canvas::new_viewport(1680, 1264, 1264, &fonts).unwrap();
+        let mut legacy_portrait = Canvas::new(1264, 1680, &fonts).unwrap();
+        let mut legacy_landscape = Canvas::new(1680, 1264, &fonts).unwrap();
+        let strip = Canvas::new(632, 96, &fonts).unwrap();
+        assert_eq!(
+            [
+                portrait.px(28),
+                landscape.px(28),
+                legacy_landscape.px(28),
+                strip.px(28)
+            ],
+            [28, 28, 37, 14]
+        );
+        assert_eq!(strip.px(5), 3);
+        assert_eq!(strip.px(-5), -3);
+        assert_eq!(landscape.bounds(), Rect::new(0, 0, 1680, 1264));
+        assert!(Canvas::new_viewport(1264, 1680, 0, &[]).is_err());
+
+        let width = portrait.measure(caption, 28);
+        let label_width = portrait.measure_with_weight("Bookmarks", 32, true);
+        assert_eq!(landscape.measure(caption, 28), width);
+        assert_eq!(
+            landscape.measure_with_weight("Bookmarks", 32, true),
+            label_width
+        );
+        assert!(legacy_landscape.measure(caption, 28) > width);
+        assert_eq!(width, legacy_portrait.measure(caption, 28));
+        const BAND: usize = 232;
+        let draw = |canvas: &mut Canvas| {
+            let bounds = canvas.bounds();
+            let top = bounds.h - BAND as i32;
+            canvas.begin();
+            canvas.panel(Rect::new(32, top + 18, 1136, 118), 22, 2, WHITE);
+            for (x, label) in [(58, "Contents"), (322, "Bookmarks"), (586, "Search")] {
+                canvas.button(Rect::new(x, top + 34, 240, 86), label, false, false);
+            }
+            canvas.text(
+                Rect::new(44, top + 163, width + 8, 44),
+                caption,
+                TextStyle::new(28),
+            );
+            let stride = bounds.w as usize;
+            canvas.finish(false)[top as usize * stride..].to_owned()
+        };
+        let portrait = draw(&mut portrait);
+        let landscape = draw(&mut landscape);
+        let legacy_portrait = draw(&mut legacy_portrait);
+        let legacy_landscape = draw(&mut legacy_landscape);
+        let shared_pixels = |wide: &[u8]| {
+            wide.chunks_exact(1680)
+                .flat_map(|row| row[..1264].iter().copied())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(portrait, legacy_portrait);
+        assert_eq!(portrait, shared_pixels(&landscape));
+        assert_ne!(portrait, shared_pixels(&legacy_landscape));
+        assert!(portrait[18 * 1264..136 * 1264]
+            .iter()
+            .any(|&pixel| pixel == BLACK));
+        assert!(portrait[163 * 1264..207 * 1264]
+            .iter()
+            .any(|&pixel| pixel == BLACK));
+
+        if let Some(dir) = std::env::var_os("KL_TEST_VIEWPORT_CAPTURE_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            for (name, width, pixels) in
+                [("portrait", 1264, portrait), ("landscape", 1680, landscape)]
+            {
+                let file =
+                    std::fs::File::create(dir.join(format!("viewport-chrome-{name}.png"))).unwrap();
+                let mut png = png::Encoder::new(file, width, BAND as u32);
+                png.set_color(png::ColorType::Grayscale);
+                png.set_depth(png::BitDepth::Eight);
+                png.write_header()
+                    .unwrap()
+                    .write_image_data(&pixels)
+                    .unwrap();
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires the two Noto Sans static UI font files"]
     fn emphasized_utf8_range_shapes_one_line_and_preserves_unstyled_prefix_pixels() {
-        let paths = std::env::var_os("KL_TEST_FONTS").expect("supply regular and bold Noto Sans");
-        let fonts: Vec<_> = std::env::split_paths(&paths)
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
+        let fonts = test_fonts();
         let mut canvas = Canvas::new(1264, 180, &fonts).unwrap();
         let rect = Rect::new(15, 18, 1220, 110);
         let text = "Coast and café";
