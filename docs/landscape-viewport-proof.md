@@ -108,6 +108,29 @@ points. This API does not negotiate overlay ownership or resize app layouts.
 [Viewport transform](../crates/kl-core/src/viewport.rs) ·
 [Viewport presentation](../crates/primitive-eink/src/display.rs)
 
+## Shared input API
+
+Launcher can replace its portrait input loops with
+`kl_kindle::input::viewport_touch_loop` and `viewport_button_loop` when
+it accepts a four-way viewport. Share one `ViewportGeneration` with those
+threads and send each `ViewportEvent` to the Launcher event queue. Maintain
+the existing evdev grab at the same boundary when changing overlay focus.
+
+A touch event stores both native points and its press generation, including
+every hold stage. Before testing a top edge or dispatching to the visible
+layout, call `event.resolve(&generation, visible_turn)` on the event loop.
+The result carries `Input` and the full projected touch origin. Framebuffer
+turn is not part of this API because it affects raster memory only.
+
+Advance the generation when the event loop commits a new viewport or changes
+the visible input owner. Clear any active selection or drag state belonging
+to the previous viewport then. Any queued event from the previous generation,
+including a release without its original hold start, is discarded. Ignore
+input during a pending handoff and resolve new contacts once the visible
+viewport is ready. Existing portrait callers can continue using `Ev::Input`.
+[Input adapter](../crates/kl-kindle/src/input.rs) ·
+[Native viewport events](../crates/primitive-input/src/viewport.rs)
+
 ## Mac proof
 
 Run from the Tools repository root with readable copies of Noto Sans Regular

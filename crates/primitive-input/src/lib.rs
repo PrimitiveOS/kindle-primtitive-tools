@@ -1,6 +1,9 @@
 //! Touch and page-button readers (evdev), adapted from Primitive Browser 0.2.12
 //! (`crates/kb-kindle/src/main.rs`). Each runs on its own thread and sends gestures in screen
-//! coordinates, already turned for the launcher's rotation.
+//! coordinates, already turned for the launcher's rotation. Viewport-aware callers can
+//! opt into native coordinates and generation-tagged events.
+
+pub mod viewport;
 
 use std::{
     fs::{self, File},
@@ -12,6 +15,7 @@ use std::{
 
 pub use kl_core::Input;
 use primitive_device::{log, profile};
+use viewport::{NativeTouch, TouchPhase};
 
 /// The turn the launcher draws in: 0 upright, 2 upside down. Touch and buttons follow it.
 pub static TURN: AtomicU32 = AtomicU32::new(0);
@@ -151,7 +155,11 @@ pub fn gesture(start: (f32, f32), end: (f32, f32), held: Duration) -> Input {
 }
 
 fn page_button(code: u16, turn: u32) -> Option<Input> {
-    match (code, turn == 2) {
+    page_button_for(code, turn == 2)
+}
+
+fn page_button_for(code: u16, swapped: bool) -> Option<Input> {
+    match (code, swapped) {
         (KEY_PAGEDOWN, false) | (KEY_PAGEUP, true) => Some(Input::PageForward),
         (KEY_PAGEUP, false) | (KEY_PAGEDOWN, true) => Some(Input::PageBack),
         _ => None,
@@ -183,38 +191,150 @@ pub fn touch_loop(path: String, mut report: impl FnMut(Input)) {
 
 /// Report completed gestures together with their horizontal start in screen coordinates.
 pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) {
+    read_touches(
+        path,
+        || (),
+        || TURN.load(Ordering::Relaxed),
+        |touch, (), turn| {
+            let (input, origin) = touch.reduce(|(x, y)| turn_point(turn, x, y));
+            report(input, origin.0);
+        },
+    );
+}
+
+struct Contact<Generation> {
+    generation: Generation,
+    pressed_at: Instant,
+    first: Option<((f32, f32), u32)>,
+    last: (f32, f32),
+    hold_started: bool,
+    last_pan: (f32, f32),
+    last_pan_at: Instant,
+}
+
+impl<Generation: Copy> Contact<Generation> {
+    fn new(pressed_at: Instant, generation: Generation) -> Self {
+        Self {
+            generation,
+            pressed_at,
+            first: None,
+            last: (0.0, 0.0),
+            hold_started: false,
+            last_pan: (0.0, 0.0),
+            last_pan_at: pressed_at,
+        }
+    }
+
+    fn timeout(&self, now: Instant) -> Option<Duration> {
+        (self.first.is_some() && !self.hold_started)
+            .then(|| HOLD_START.saturating_sub(now.duration_since(self.pressed_at)))
+    }
+
+    fn emit(&self, phase: TouchPhase, report: &mut impl FnMut(NativeTouch, Generation, u32)) {
+        if let Some((start, turn)) = self.first {
+            let touch = NativeTouch {
+                start,
+                end: self.last,
+                phase,
+            };
+            report(touch, self.generation, turn);
+        }
+    }
+
+    fn last_in_legacy_view(&self) -> (f32, f32) {
+        let turn = self.first.map_or(0, |(_, turn)| turn);
+        turn_point(turn, self.last.0, self.last.1)
+    }
+
+    fn moved_since_last_pan(&self, distance: f32) -> bool {
+        let (x, y) = self.last_in_legacy_view();
+        (x - self.last_pan.0).abs() >= distance || (y - self.last_pan.1).abs() >= distance
+    }
+
+    fn idle(&mut self, now: Instant, report: &mut impl FnMut(NativeTouch, Generation, u32)) {
+        if !self.hold_started && self.first.is_some() {
+            self.emit(TouchPhase::HoldStart, report);
+            self.hold_started = true;
+            self.last_pan = self.last_in_legacy_view();
+            self.last_pan_at = now;
+        }
+    }
+
+    fn sample(
+        &mut self,
+        point: (f32, f32),
+        now: Instant,
+        first_turn: impl FnOnce() -> u32,
+        report: &mut impl FnMut(NativeTouch, Generation, u32),
+    ) {
+        self.last = point;
+        if self.first.is_none() {
+            self.first = Some((point, first_turn()));
+        } else if self.hold_started
+            && self.moved_since_last_pan(HOLD_PAN_MIN_DISTANCE)
+            && now.duration_since(self.last_pan_at) >= HOLD_PAN_INTERVAL
+        {
+            self.emit(TouchPhase::HoldPan, report);
+            self.last_pan = self.last_in_legacy_view();
+            self.last_pan_at = now;
+        }
+    }
+
+    fn finish(self, now: Instant, report: &mut impl FnMut(NativeTouch, Generation, u32)) {
+        let held = now.duration_since(self.pressed_at);
+        if self.hold_started || is_hold_threshold_reached(held) {
+            if !self.hold_started {
+                self.emit(TouchPhase::HoldStart, report);
+            }
+            if self.moved_since_last_pan(1.0) {
+                self.emit(TouchPhase::HoldPan, report);
+            }
+            self.emit(
+                TouchPhase::HoldRelease {
+                    held_ms: held_milliseconds(held),
+                },
+                report,
+            );
+        } else {
+            self.emit(TouchPhase::Finished(held), report);
+        }
+    }
+}
+
+fn read_touches<Generation: Copy>(
+    path: String,
+    mut on_press: impl FnMut() -> Generation,
+    mut first_turn: impl FnMut() -> u32,
+    mut report: impl FnMut(NativeTouch, Generation, u32),
+) {
     let mut file = match File::open(&path) {
         Ok(f) => f,
         Err(e) => return log(&format!("cannot open {path}: {e}")),
     };
-    let (Some(xi), Some(yi)) = (abs_range(&file, ABS_MT_POSITION_X), abs_range(&file, ABS_MT_POSITION_Y)) else {
+    let (Some(xi), Some(yi)) = (
+        abs_range(&file, ABS_MT_POSITION_X),
+        abs_range(&file, ABS_MT_POSITION_Y),
+    ) else {
         return log("touch ranges unavailable");
     };
-    log(&format!("touch {path}: x {}..{} y {}..{}", xi.minimum, xi.maximum, yi.minimum, yi.maximum));
+    log(&format!(
+        "touch {path}: x {}..{} y {}..{}",
+        xi.minimum, xi.maximum, yi.minimum, yi.maximum
+    ));
     TOUCH_FD.store(file.as_raw_fd(), Ordering::Relaxed);
     let (mut raw_x, mut raw_y) = (0i32, 0i32);
-    let mut active = false;
-    let mut start: Option<((f32, f32), u32)> = None;
-    let mut last = (0.0f32, 0.0f32);
-    let mut down_at = Instant::now();
-    let mut hold_started = false;
-    let mut last_pan = (0.0f32, 0.0f32);
-    let mut last_pan_at = down_at;
+    let mut contact: Option<Contact<Generation>> = None;
     loop {
-        let timeout = (active && start.is_some() && !hold_started)
-            .then(|| HOLD_START.saturating_sub(down_at.elapsed()));
+        let timeout = contact
+            .as_ref()
+            .and_then(|touch| touch.timeout(Instant::now()));
         let ready = match wait_for_event(&file, timeout) {
             Ok(ready) => ready,
             Err(error) => return log(&format!("touch poll failed: {error}")),
         };
         if !ready {
-            if active && !hold_started {
-                if let Some((point, _)) = start {
-                    report(Input::HoldStart(point.0, point.1), point.0);
-                    hold_started = true;
-                    last_pan = last;
-                    last_pan_at = Instant::now();
-                }
+            if let Some(touch) = contact.as_mut() {
+                touch.idle(Instant::now(), &mut report);
             }
             continue;
         }
@@ -222,63 +342,20 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
             return log("touch read failed");
         };
         match (ev.kind, ev.code) {
+            (EV_ABS, ABS_MT_TRACKING_ID) if ev.value >= 0 => {
+                contact = Some(Contact::new(Instant::now(), on_press()));
+            }
             (EV_ABS, ABS_MT_TRACKING_ID) => {
-                if ev.value >= 0 {
-                    active = true;
-                    start = None;
-                    down_at = Instant::now();
-                    hold_started = false;
-                    last_pan = (0.0, 0.0);
-                    last_pan_at = down_at;
-                } else if active {
-                    active = false;
-                    if let Some((point, _)) = start {
-                        let held = down_at.elapsed();
-                        if hold_started || is_hold_threshold_reached(held) {
-                            if !hold_started {
-                                report(Input::HoldStart(point.0, point.1), point.0);
-                                hold_started = true;
-                            }
-                            if (last.0 - last_pan.0).abs() >= 1.0
-                                || (last.1 - last_pan.1).abs() >= 1.0
-                            {
-                                report(Input::HoldPan(last.0, last.1), point.0);
-                            }
-                            report(
-                                Input::HoldRelease {
-                                    start_x: point.0,
-                                    start_y: point.1,
-                                    x: last.0,
-                                    y: last.1,
-                                    held_ms: held_milliseconds(held),
-                                },
-                                point.0,
-                            );
-                        } else {
-                            report(gesture(point, last, held), point.0);
-                        }
-                    }
+                if let Some(touch) = contact.take() {
+                    touch.finish(Instant::now(), &mut report);
                 }
             }
             (EV_ABS, ABS_MT_POSITION_X) => raw_x = ev.value,
             (EV_ABS, ABS_MT_POSITION_Y) => raw_y = ev.value,
-            (EV_SYN, SYN_REPORT) if active => {
-                // Use a single orientation for the gesture if the device turns mid-touch.
-                let turn = start.map_or_else(|| TURN.load(Ordering::Relaxed), |(_, turn)| turn);
-                last = turn_point(turn, scale(raw_x, &xi, NATIVE_W), scale(raw_y, &yi, NATIVE_H));
-                if start.is_none() {
-                    start = Some((last, turn));
-                } else if hold_started
-                    && ((last.0 - last_pan.0).abs() >= HOLD_PAN_MIN_DISTANCE
-                        || (last.1 - last_pan.1).abs() >= HOLD_PAN_MIN_DISTANCE)
-                    && last_pan_at.elapsed() >= HOLD_PAN_INTERVAL
-                {
-                    report(
-                        Input::HoldPan(last.0, last.1),
-                        start.map_or(last.0, |(point, _)| point.0),
-                    );
-                    last_pan = last;
-                    last_pan_at = Instant::now();
+            (EV_SYN, SYN_REPORT) => {
+                if let Some(touch) = contact.as_mut() {
+                    let point = (scale(raw_x, &xi, NATIVE_W), scale(raw_y, &yi, NATIVE_H));
+                    touch.sample(point, Instant::now(), &mut first_turn, &mut report);
                 }
             }
             _ => {}
@@ -288,6 +365,14 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
 
 /// Page buttons: presses only. Upside down, forward and back trade places.
 pub fn button_loop(path: String, mut report: impl FnMut(Input)) {
+    read_buttons(path, |code| {
+        if let Some(input) = page_button(code, TURN.load(Ordering::Relaxed)) {
+            report(input);
+        }
+    });
+}
+
+fn read_buttons(path: String, mut report: impl FnMut(u16)) {
     let mut file = match File::open(&path) {
         Ok(f) => f,
         Err(e) => return log(&format!("cannot open {path}: {e}")),
@@ -300,8 +385,8 @@ pub fn button_loop(path: String, mut report: impl FnMut(Input)) {
         if ev.kind != EV_KEY || ev.value != 1 {
             continue;
         }
-        if let Some(input) = page_button(ev.code, TURN.load(Ordering::Relaxed)) {
-            report(input);
+        if matches!(ev.code, KEY_PAGEUP | KEY_PAGEDOWN) {
+            report(ev.code);
         }
     }
 }
@@ -331,6 +416,36 @@ mod tests {
         assert_eq!(gesture((10.0, 10.0), (20.0, 15.0), short), Input::Tap(10.0, 10.0));
         assert_eq!(gesture((10.0, 10.0), (20.0, 15.0), Duration::from_secs(1)), Input::LongTap(10.0, 10.0));
         assert_eq!(gesture((500.0, 10.0), (100.0, 30.0), short), Input::Swipe { dx: -400.0, dy: 20.0, start_y: 10.0 });
+    }
+
+    #[test]
+    fn legacy_touch_latches_its_turn_at_the_first_sample_and_keeps_horizontal_origin() {
+        let pressed = Instant::now();
+        let mut touch = Contact::new(pressed, ());
+        let mut events = Vec::new();
+        let mut report = |native: NativeTouch, (), turn| {
+            events.push(native.reduce(|(x, y)| turn_point(turn, x, y)));
+        };
+        touch.sample((10.0, 20.0), pressed, || 2, &mut report);
+        touch.sample(
+            (10.0, 220.0),
+            pressed + Duration::from_millis(200),
+            || 0,
+            &mut report,
+        );
+        touch.finish(pressed + Duration::from_millis(300), &mut report);
+        let (start_x, start_y) = turn_point(2, 10.0, 20.0);
+        assert_eq!(
+            events,
+            [(
+                Input::Swipe {
+                    dx: 0.0,
+                    dy: -200.0,
+                    start_y
+                },
+                (start_x, start_y)
+            )]
+        );
     }
 
     #[test]
