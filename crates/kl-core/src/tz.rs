@@ -1,13 +1,14 @@
 //! Interpret the explicit time-zone transitions in the Kindle's TZif file.
 //!
 //! The firmware's file can have an empty POSIX footer. Keep the last known
-//! offset as the stock Kindle clock does. For files with recurring POSIX
-//! rules or leap seconds, let the platform's time-zone implementation apply
-//! those rules.
+//! offset as the stock Kindle clock does. Let libc evaluate a recurring
+//! POSIX rule after the explicit table ends, or handle leap-second tables.
 //!
 //! TZif layout: https://www.rfc-editor.org/rfc/rfc9636.html#section-3
 
 const HEADER_SIZE: usize = 44;
+const MAX_WEST_OFFSET: i32 = 89_999;
+const MAX_EAST_OFFSET: i32 = 93_599;
 
 fn int_at(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
@@ -57,25 +58,27 @@ pub struct Zone {
     times: Vec<i64>,
     kinds: Vec<u8>,
     offsets: Vec<i32>,
+    recurring_from: Option<i64>,
 }
 
 impl Zone {
-    /// Decode a transition table that needs no recurring rules. For version
-    /// 2 or newer use its 64-bit table, including pre-1901 transitions.
+    /// Decode the transitions. For version 2 or newer use its 64-bit
+    /// table, including pre-1901 transitions.
     pub fn from_tzif(data: &[u8]) -> Option<Self> {
         let version = *data.get(4)?;
         let first = block(data, 4)?;
-        let (table, width) = match version {
-            0 => (first, 4),
+        let (table, width, recurring) = match version {
+            0 => (first, 4, false),
             b'2'..=b'4' => {
                 if first.tail.get(4) != Some(&version) {
                     return None;
                 }
                 let second = block(first.tail, 8)?;
-                if second.tail != b"\n\n" {
+                let tail = second.tail.strip_prefix(b"\n")?.strip_suffix(b"\n")?;
+                if !tail.is_ascii() || tail.iter().any(|&byte| byte < 32 || byte == 127) {
                     return None;
                 }
-                (second, 8)
+                (second, 8, !tail.is_empty())
             }
             _ => return None,
         };
@@ -107,24 +110,35 @@ impl Zone {
                 .any(|&kind| usize::from(kind) >= offsets.len())
             || offsets
                 .iter()
-                .any(|value| !(-89_999..=93_599).contains(value))
+                .any(|value| !(-MAX_WEST_OFFSET..=MAX_EAST_OFFSET).contains(value))
         {
             return None;
         }
+        let recurring_from = recurring.then(|| times.last().copied().unwrap_or(i64::MIN));
         Some(Self {
             times,
             kinds: table.indices.to_vec(),
             offsets,
+            recurring_from,
         })
     }
 
-    /// Seconds east of UTC at this Unix timestamp.
-    pub fn offset_at(&self, instant: i64) -> i32 {
+    /// Seconds east of UTC, when the explicit table specifies the offset.
+    pub fn offset_at(&self, instant: i64) -> Option<i32> {
+        if self.recurring_from.is_some_and(|start| instant >= start) {
+            return None;
+        }
         let offset_index = self.times.partition_point(|&time| time <= instant);
         let kind = offset_index
             .checked_sub(1)
             .map_or(0, |index| self.kinds[index]);
-        self.offsets[usize::from(kind)]
+        Some(self.offsets[usize::from(kind)])
+    }
+
+    /// Whether any UTC candidate for this civil time could require libc.
+    pub fn may_require_recurring_rule(&self, civil: i64) -> bool {
+        self.recurring_from
+            .is_some_and(|start| civil.saturating_add(i64::from(MAX_WEST_OFFSET)) >= start)
     }
 
     /// Translate civil time, encoded as seconds as if in UTC, to a Unix
@@ -137,7 +151,7 @@ impl Zone {
             .iter()
             .filter_map(|&offset| {
                 let instant = civil.checked_sub(i64::from(offset))?;
-                (self.offset_at(instant) == offset).then_some(instant)
+                (self.offset_at(instant) == Some(offset)).then_some(instant)
             })
             .peekable();
         if exact.peek().is_some() || !advance_gap {
@@ -145,6 +159,9 @@ impl Zone {
         }
         let mut before = self.offsets[0];
         for (&instant, &kind) in self.times.iter().zip(&self.kinds) {
+            if self.recurring_from.is_some_and(|start| instant >= start) {
+                break;
+            }
             let after = self.offsets[usize::from(kind)];
             let start = instant.checked_add(i64::from(before));
             let end = instant.checked_add(i64::from(after));
@@ -165,7 +182,7 @@ impl Zone {
 /// Seconds east of UTC for the supplied transition table, or `None` when the
 /// table is invalid or needs the system's recurring rules.
 pub fn offset_at(data: &[u8], now: i64) -> Option<i32> {
-    Some(Zone::from_tzif(data)?.offset_at(now))
+    Zone::from_tzif(data)?.offset_at(now)
 }
 
 /// The offset displayed in device settings, including fractional-hour zones.
@@ -240,7 +257,7 @@ mod tests {
     fn local_round_trip_uses_the_last_known_offset() {
         let zone = Zone::from_tzif(&tzif(&[(0, 1)], &[0, 7 * 3600])).unwrap();
         let instant = 1_794_935_000;
-        let civil = instant + i64::from(zone.offset_at(instant));
+        let civil = instant + i64::from(zone.offset_at(instant).unwrap());
         assert_eq!(zone.resolve_local(civil, None, false), Some(instant));
         assert_eq!(zone.resolve_local(civil, Some(instant), true), None);
     }
@@ -271,7 +288,11 @@ mod tests {
         assert_eq!(offset_at(&first, transition), Some(3600));
         first.pop();
         first.extend(b"STD-1\n");
-        assert!(Zone::from_tzif(&first).is_none());
+        let recurring = Zone::from_tzif(&first).unwrap();
+        assert_eq!(recurring.offset_at(transition - 1), Some(0));
+        assert_eq!(recurring.offset_at(transition), None);
+        assert!(!recurring.may_require_recurring_rule(transition - 90_000));
+        assert!(recurring.may_require_recurring_rule(transition));
     }
 
     #[test]

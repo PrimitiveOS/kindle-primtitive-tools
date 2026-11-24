@@ -133,7 +133,7 @@ impl DeviceTimeZone {
     }
 
     pub fn local_time_at(&self, unix_seconds: i64) -> Option<LocalTime> {
-        let offset = self.zone.as_ref().map(|zone| zone.offset_at(unix_seconds));
+        let offset = self.zone.as_ref().and_then(|zone| zone.offset_at(unix_seconds));
         civil_time_at(unix_seconds, offset)
     }
 
@@ -150,10 +150,15 @@ impl DeviceTimeZone {
     }
 
     fn resolve(&self, civil: i64, after: Option<i64>, advance_gap: bool) -> Option<i64> {
-        match &self.zone {
-            Some(zone) => zone.resolve_local(civil, after, advance_gap),
-            None => system_resolve_local(civil, after, advance_gap),
+        if let Some(zone) = &self.zone {
+            let explicit = zone.resolve_local(civil, after, advance_gap);
+            if !zone.may_require_recurring_rule(civil) {
+                return explicit;
+            }
+            let system = system_resolve_local(civil, after, advance_gap);
+            return explicit.into_iter().chain(system).min();
         }
+        system_resolve_local(civil, after, advance_gap)
     }
 }
 
@@ -181,46 +186,35 @@ pub fn resolve_local_time_after(local_seconds_as_utc: i64, after_utc: i64) -> Op
     DeviceTimeZone::load().resolve_local_time_after(local_seconds_as_utc, after_utc)
 }
 
-#[allow(clippy::useless_conversion)] // time_t is narrower on some supported targets.
 fn system_resolve_local(civil: i64, after: Option<i64>, advance_gap: bool) -> Option<i64> {
-    let civil_time = libc::time_t::try_from(civil).ok()?;
-    let mut requested = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // SAFETY: gmtime_r initializes the caller's buffer on success.
-    let requested = unsafe {
-        if libc::gmtime_r(&civil_time, requested.as_mut_ptr()).is_null() {
-            return None;
-        }
-        requested.assume_init()
-    };
-
+    // Recurring rules can change the offset on either side of the point
+    // where local seconds are interpreted as UTC. Probe both sides to
+    // recover the candidates, even for a transition with no DST flag change.
     let mut had_exact = false;
     let mut exact: Option<i64> = None;
     let mut forward: Option<(i64, i64)> = None;
-    for hint in [-1, 0, 1] {
-        let mut local = requested;
-        local.tm_isdst = hint;
-        // SAFETY: mktime and timegm use the caller's initialized tm. The
-        // former normalizes local, so it can be read back as civil seconds.
-        let instant = unsafe { libc::mktime(&mut local) };
-        let mut round_trip = std::mem::MaybeUninit::<libc::tm>::uninit();
-        let projected = unsafe {
-            if libc::localtime_r(&instant, round_trip.as_mut_ptr()).is_null() {
-                continue;
-            }
-            let mut round_trip = round_trip.assume_init();
-            libc::timegm(&mut round_trip)
+    for days in [-2_i64, -1, 0, 1, 2] {
+        let Some(offset) = civil
+            .checked_add(days * 86_400)
+            .and_then(|probe| civil_time_at(probe, None)?.utc_offset)
+        else {
+            continue;
         };
-        let instant = i64::from(instant);
-        let projected = i64::from(projected);
+        let Some((instant, actual)) = civil.checked_sub(i64::from(offset)).and_then(|instant| {
+            Some((instant, civil_time_at(instant, None)?.utc_offset?))
+        }) else {
+            continue;
+        };
+        let Some(projected) = instant.checked_add(i64::from(actual)) else {
+            continue;
+        };
         had_exact |= projected == civil;
         if after.is_some_and(|limit| instant <= limit) {
             continue;
         }
         if projected == civil {
             exact = Some(exact.map_or(instant, |old| old.min(instant)));
-        } else if advance_gap
-            && projected.checked_sub(civil).is_some_and(|delta| (1..=183_598).contains(&delta))
-        {
+        } else if advance_gap && projected > civil {
             let candidate = (projected, instant);
             forward = Some(forward.map_or(candidate, |old| old.min(candidate)));
         }
@@ -253,7 +247,7 @@ fn civil_time_at(unix_seconds: i64, offset: Option<i32>) -> Option<LocalTime> {
         minute: tm.tm_min,
         second: tm.tm_sec,
         weekday: tm.tm_wday,
-        utc_offset: offset,
+        utc_offset: offset.or_else(|| i32::try_from(tm.tm_gmtoff).ok()),
     })
 }
 
