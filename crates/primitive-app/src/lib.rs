@@ -405,7 +405,7 @@ fn follow_redraw_signal(events: mpsc::Sender<Event>) {
 
 enum Event {
     Input(Input, Option<f32>),
-    ViewportInput(input::viewport::ViewportEvent),
+    ViewportInput(input::viewport::ViewportEvent, Option<u64>),
     Turn(Rotation),
     StorageChanged,
     UsbRedraw,
@@ -523,7 +523,7 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         thread::spawn(move || {
             if let Some(generation) = generation {
                 input::viewport::viewport_touch_loop(path, &generation, |event| {
-                    let _ = events.send(Event::ViewportInput(event));
+                    let _ = events.send(Event::ViewportInput(event, None));
                 });
             } else {
                 input::touch_loop_with_origin(path, |input, start_x| {
@@ -538,8 +538,8 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         let generation = viewport.as_ref().map(ViewportSession::input_generation);
         thread::spawn(move || {
             if let Some(generation) = generation {
-                input::viewport::viewport_button_loop(path, &generation, |event| {
-                    let _ = events.send(Event::ViewportInput(event));
+                input::viewport::viewport_button_loop_timed(path, &generation, |event, stamp| {
+                    let _ = events.send(Event::ViewportInput(event, stamp));
                 });
             } else {
                 input::button_loop(path, |input| {
@@ -653,9 +653,9 @@ pub fn run(mut app: impl App, app_dir: &Path) -> Result<(), String> {
         }
         let usb_redraw = matches!(event, Ok(Event::UsbRedraw));
         let event = event.map(|event| match event {
-            Event::ViewportInput(raw) => viewport
+            Event::ViewportInput(raw, stamp) => viewport
                 .as_mut()
-                .and_then(|viewport| viewport.resolve(raw, &display))
+                .and_then(|viewport| viewport.resolve(raw, stamp, &display))
                 .map_or(Event::Redraw, |resolved| {
                     Event::Input(resolved.input, resolved.touch_origin.map(|(x, _)| x))
                 }),

@@ -6,7 +6,7 @@ use std::{
 };
 
 use kl_core::viewport::ViewportTransform;
-use primitive_input::viewport::{ResolvedInput, ViewportEvent, ViewportGeneration};
+use primitive_input::viewport::{NativeInput, ResolvedInput, ViewportEvent, ViewportGeneration};
 
 use super::{
     FramebufferGeometry, LogicalTurn, ReadyViewport, Viewport, ViewportDecision, ViewportPublisher,
@@ -40,12 +40,25 @@ impl Session {
     pub(crate) fn resolve(
         &mut self,
         input: ViewportEvent,
+        stamp: Option<u64>,
         display: &Display,
     ) -> Option<ResolvedInput> {
+        self.resolve_with(input, stamp, || display.viewport_framebuffer())
+    }
+
+    fn resolve_with(
+        &mut self,
+        input: ViewportEvent,
+        stamp: Option<u64>,
+        framebuffer: impl FnOnce() -> Option<FramebufferGeometry>,
+    ) -> Option<ResolvedInput> {
+        if matches!(input.native, NativeInput::PageKey(_))
+            && !self.publisher.page_key_fence().accepts(stamp)
+        {
+            return None;
+        }
         let was_ready = self.runtime.is_ready();
-        let resolved = self
-            .runtime
-            .resolve_verified(input, || display.viewport_framebuffer());
+        let resolved = self.runtime.resolve_verified(input, framebuffer);
         if was_ready && !self.runtime.is_ready() {
             self.retry_at = None;
         }
@@ -400,6 +413,59 @@ mod tests {
             generation,
             native: NativeInput::PageKey(109),
         }
+    }
+
+    #[test]
+    fn resumed_page_press_needs_both_a_fresh_kernel_timestamp_and_the_accepted_generation() {
+        let root =
+            std::env::temp_dir().join(format!("viewport-page-generation-{}", std::process::id()));
+        let scope = root.join("app-turn.ABC123");
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(root.join("app-turn-owner"), "v1 12 345 app-turn.ABC123\n").unwrap();
+        let viewport_path = scope.join("viewport");
+        let publisher = ViewportPublisher::new(&root, Some(viewport_path))
+            .unwrap()
+            .unwrap();
+        let fence = publisher.page_key_fence();
+        let mut session = Session::new(publisher);
+        let candidate = session.runtime.candidate(LogicalTurn::Clockwise);
+        let ready = accepted(candidate);
+        let live = || Some(ready.framebuffer);
+        session.runtime.invalidate();
+        session.runtime.accept(ready.clone(), true);
+        let generation = session.input_generation().current();
+        assert!(session
+            .resolve_with(button(generation), Some(8), live)
+            .is_some());
+
+        fence.hold().unwrap();
+        assert!(session
+            .resolve_with(button(generation), Some(45), live)
+            .is_none());
+        assert!(session
+            .resolve_with(button(generation), None, live)
+            .is_none());
+        std::fs::write(scope.join("launcher-page-key-cutoff"), "42\n").unwrap();
+        assert!(session
+            .resolve_with(button(generation), Some(42), live)
+            .is_none());
+        assert!(session
+            .resolve_with(button(generation - 1), Some(43), live)
+            .is_none());
+        assert_eq!(
+            session
+                .resolve_with(button(generation), Some(43), live)
+                .unwrap()
+                .input,
+            Input::PageBack,
+        );
+        assert!(
+            session
+                .resolve_with(button(generation), None, live)
+                .is_some(),
+            "retain old button behavior when the kernel cannot supply a monotonic timestamp"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

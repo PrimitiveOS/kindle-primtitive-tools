@@ -7,7 +7,9 @@ use std::{
 
 use kl_core::viewport::LogicalTurn;
 
-use crate::{gesture, page_button_for, read_buttons, read_touches, Input, NATIVE_H, NATIVE_W};
+use crate::{
+    gesture, page_button_for, read_buttons_with_clock, read_touches, Input, NATIVE_H, NATIVE_W,
+};
 
 /// Advance when the visible viewport or its owner changes. Share this instance
 /// between the event loop and its input readers.
@@ -143,11 +145,33 @@ pub fn viewport_button_loop(
     generation: &ViewportGeneration,
     mut report: impl FnMut(ViewportEvent),
 ) {
-    read_buttons(path, |code| {
-        report(ViewportEvent {
-            generation: generation.current(),
-            native: NativeInput::PageKey(code),
-        });
+    read_viewport_buttons(path, generation, false, |event, _| report(event));
+}
+
+/// Read page presses with kernel monotonic timestamps when supported.
+/// An older evdev implementation reports `None` without grabbing the power key.
+pub fn viewport_button_loop_timed(
+    path: String,
+    generation: &ViewportGeneration,
+    report: impl FnMut(ViewportEvent, Option<u64>),
+) {
+    read_viewport_buttons(path, generation, true, report);
+}
+
+fn read_viewport_buttons(
+    path: String,
+    generation: &ViewportGeneration,
+    timed: bool,
+    mut report: impl FnMut(ViewportEvent, Option<u64>),
+) {
+    read_buttons_with_clock(path, timed, |code, stamp| {
+        report(
+            ViewportEvent {
+                generation: generation.current(),
+                native: NativeInput::PageKey(code),
+            },
+            stamp,
+        );
     });
 }
 

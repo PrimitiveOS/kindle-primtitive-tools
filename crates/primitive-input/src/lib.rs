@@ -373,11 +373,19 @@ pub fn button_loop(path: String, mut report: impl FnMut(Input)) {
 }
 
 fn read_buttons(path: String, mut report: impl FnMut(u16)) {
+    read_buttons_with_clock(path, false, |code, _| report(code));
+}
+
+fn read_buttons_with_clock(path: String, timed: bool, mut report: impl FnMut(u16, Option<u64>)) {
     let mut file = match File::open(&path) {
         Ok(f) => f,
         Err(e) => return log(&format!("cannot open {path}: {e}")),
     };
     log(&format!("buttons {path}"));
+    let monotonic = timed && use_monotonic_events(&file);
+    if timed && !monotonic {
+        log("page key timestamps are unavailable; Launcher overlay key filtering is disabled");
+    }
     loop {
         let Some(ev) = read_event(&mut file) else {
             return log("button read failed");
@@ -386,14 +394,42 @@ fn read_buttons(path: String, mut report: impl FnMut(u16)) {
             continue;
         }
         if matches!(ev.code, KEY_PAGEUP | KEY_PAGEDOWN) {
-            report(ev.code);
+            let time = monotonic.then(|| monotonic_micros(ev.tv_sec.into(), ev.tv_usec.into())).flatten();
+            if monotonic && time.is_none() {
+                continue;
+            }
+            report(ev.code, time);
         }
     }
+}
+
+fn use_monotonic_events(file: &File) -> bool {
+    // _IOW('E', 0xa0, int) selects the clock for only this evdev descriptor.
+    const EVIOCSCLOCKID: u32 = 0x4004_45a0;
+    let clock = libc::CLOCK_MONOTONIC;
+    // SAFETY: the kernel reads one initialized c_int from a live pointer.
+    unsafe { libc::ioctl(file.as_raw_fd(), EVIOCSCLOCKID as _, &clock) == 0 }
+}
+
+fn monotonic_micros(seconds: i64, micros: i64) -> Option<u64> {
+    if !(0..1_000_000).contains(&micros) {
+        return None;
+    }
+    u64::try_from(seconds).ok()?.checked_mul(1_000_000)?.checked_add(micros as u64)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evdev_monotonic_microseconds_include_only_valid_timevals() {
+        assert_eq!(monotonic_micros(24, 123), Some(24_000_123));
+        assert_eq!(monotonic_micros(-1, 123), None);
+        assert_eq!(monotonic_micros(3, -1), None);
+        assert_eq!(monotonic_micros(3, 1_000_000), None);
+        assert_eq!(monotonic_micros(i64::MAX, 1), None);
+    }
 
     #[test]
     fn upside_down_turns_touches() {

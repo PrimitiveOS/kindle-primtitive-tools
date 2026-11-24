@@ -10,7 +10,7 @@ use kl_core::viewport::ViewportTransform;
 use kl_kindle::{
     display::Display,
     profile,
-    viewport::{live_viewport_owner, valid_viewport_offer, ViewportOwner, ViewportRecord},
+    viewport::{live_viewport_owner, valid_viewport_offer, PageKeyFence, ViewportOwner, ViewportRecord},
 };
 
 use crate::write_atomic;
@@ -69,6 +69,10 @@ impl ViewportPublisher {
             path,
             latest: None,
         }))
+    }
+
+    pub(super) fn page_key_fence(&self) -> PageKeyFence {
+        PageKeyFence::new(&self.path)
     }
 
     /// Stage a pending record before presenting the frame. Return true only

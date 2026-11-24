@@ -318,6 +318,82 @@ pub fn read_ready_viewport(
     record.validate_ready(&after.owner, framebuffer, minimum_generation)
 }
 
+/// Prevent a stopped app from consuming page presses upon resume that the
+/// system overlay already owned. The cutoff is tied to the supervisor's
+/// unique foreground scope and uses the same clock as the app's evdev fd.
+pub struct PageKeyFence(PathBuf);
+
+impl PageKeyFence {
+    pub fn new(viewport_path: &Path) -> Self {
+        Self(viewport_path.with_file_name("launcher-page-key-cutoff"))
+    }
+
+    pub fn hold(&self) -> std::io::Result<()> {
+        self.replace(b"held\n")
+    }
+
+    /// Call after resuming the app. Until this completes, the held state
+    /// discards events even if the app starts reading its queue immediately.
+    pub fn resume(&self) -> std::io::Result<()> {
+        if self.read() != PageKeyState::Held {
+            return Ok(());
+        }
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: clock_gettime writes a timespec to this live pointer.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let seconds = u64::try_from(time.tv_sec).unwrap_or_default();
+        let micros = seconds
+            .saturating_mul(1_000_000)
+            .saturating_add(time.tv_nsec as u64 / 1_000);
+        self.resume_at(micros)
+    }
+
+    pub fn accepts(&self, stamp: Option<u64>) -> bool {
+        match (self.read(), stamp) {
+            (PageKeyState::Clear, _) => true,
+            (PageKeyState::Cutoff(cutoff), Some(stamp)) => stamp > cutoff,
+            (PageKeyState::Cutoff(_), None) => true,
+            (PageKeyState::Held, _) => false,
+        }
+    }
+
+    fn resume_at(&self, micros: u64) -> std::io::Result<()> {
+        self.replace(format!("{micros}\n").as_bytes())
+    }
+
+    fn replace(&self, content: &[u8]) -> std::io::Result<()> {
+        let temporary = self.0.with_extension("tmp");
+        std::fs::write(&temporary, content)?;
+        std::fs::rename(temporary, &self.0)
+    }
+
+    fn read(&self) -> PageKeyState {
+        // Treat an incomplete or invalid file as held. Replacement is atomic.
+        if let Some(record) = read_bounded(&self.0, 21) {
+            if let Some(cutoff) = record.strip_suffix('\n').and_then(decimal) {
+                return PageKeyState::Cutoff(cutoff);
+            }
+            return PageKeyState::Held;
+        }
+        match std::fs::symlink_metadata(&self.0) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => PageKeyState::Clear,
+            _ => PageKeyState::Held,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PageKeyState {
+    Clear,
+    Held,
+    Cutoff(u64),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +411,35 @@ mod tests {
         yoffset: 17,
         pitch: 1280,
     };
+
+    #[test]
+    fn key_cutoff_holds_until_resume_and_isolated_scopes_start_clear() {
+        let root = std::env::temp_dir().join(format!("viewport-key-fence-{}", std::process::id()));
+        let old = root.join("app-turn.ABC123");
+        let next = root.join("app-turn.GHI789");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&next).unwrap();
+        let fence = PageKeyFence::new(&old.join("viewport"));
+        let unrelated = PageKeyFence::new(&next.join("viewport"));
+        fence.resume().unwrap();
+        assert!(fence.accepts(Some(1)));
+        fence.hold().unwrap();
+        assert!(!fence.accepts(Some(44)));
+        assert!(!fence.accepts(None));
+        assert!(unrelated.accepts(Some(1)));
+        fence.resume_at(44).unwrap();
+        assert!(!fence.accepts(Some(44)));
+        assert!(fence.accepts(Some(45)));
+        fence.hold().unwrap();
+        fence.resume().unwrap();
+        let PageKeyState::Cutoff(cutoff) = fence.read() else {
+            panic!("resume did not release held presses");
+        };
+        assert!(cutoff > 0 && !fence.accepts(Some(cutoff)));
+        assert!(fence.accepts(Some(cutoff + 1)));
+        assert!(unrelated.accepts(Some(1)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn records_are_bounded_and_validate_state_generation_scope_and_geometry() {
