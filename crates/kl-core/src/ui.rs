@@ -2426,9 +2426,8 @@ mod tests {
         u.open_settings();
         let row = |u: &Ui, page, label| u.layout.page_sections(page).into_iter()
             .flat_map(|section| section.rows).find(|item| item.row == label).unwrap().rect;
-        let battery = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Battery).unwrap().1;
-        u.handle(centre(battery));
-        u.handle(centre(row(&u, Page::Battery, Row::BatteryDisplay)));
+        let display = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Display).unwrap().1;
+        u.handle(centre(display));
         u.handle(centre(row(&u, Page::Display, Row::WallpaperLink)));
         assert_eq!(u.screen, Screen::Page(Page::Wallpaper));
         let target = WallpaperTarget::Sleep;
@@ -2458,8 +2457,7 @@ mod tests {
         assert_eq!(u.wallpaper_scroll, 0);
         assert_eq!(u.handle(centre(u.layout.wallpaper_preview().apply)), Action::None);
         u.handle(Input::PageBack);
-        for expected in [Screen::Page(Page::Wallpaper), Screen::Page(Page::Display),
-            Screen::Page(Page::Battery), Screen::Settings]
+        for expected in [Screen::Page(Page::Wallpaper), Screen::Page(Page::Display), Screen::Settings]
         {
             u.handle(centre(u.layout.done_button()));
             assert_eq!(u.screen, expected);
@@ -2556,10 +2554,6 @@ mod tests {
         assert_eq!(u.screen, Screen::Page(Page::Battery));
         let power = setting_row(&u, Page::Battery, Row::LowPower);
         assert_eq!(u.handle(centre(power)), Action::Device(DeviceCmd::ToggleLowPower));
-        u.handle(centre(setting_row(&u, Page::Battery, Row::BatteryDisplay)));
-        assert_eq!(u.screen, Screen::Page(Page::Display));
-        u.handle(Input::PageBack);
-        assert_eq!(u.screen, Screen::Page(Page::Battery));
 
         u.handle(Input::PageBack);
         u.handle(swipe(-900.0));
@@ -3078,8 +3072,8 @@ mod tests {
         let (tile_kind, tile) = u.layout.quick_buttons()[4];
         assert_eq!(tile_kind, QuickTile::ScreenTimeout);
         assert_eq!(u.handle(centre(u.layout.quick_button_circle(tile))), Action::Device(DeviceCmd::CycleScreenTimeout));
-        u.screen = Screen::Page(Page::Battery);
-        let row = u.layout.page_sections(Page::Battery).into_iter().flat_map(|s| s.rows).find(|r| r.row == crate::layout::Row::ScreenTimeout).unwrap();
+        u.screen = Screen::Page(Page::Sleep);
+        let row = u.layout.page_sections(Page::Sleep).into_iter().flat_map(|s| s.rows).find(|r| r.row == crate::layout::Row::ScreenTimeout).unwrap();
         assert_eq!(u.handle(centre(row.rect)), Action::Device(DeviceCmd::CycleScreenTimeout));
     }
 

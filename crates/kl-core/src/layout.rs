@@ -58,7 +58,6 @@ pub enum Page {
     Wallpaper,
     Accessibility,
     Battery,
-    Usage,
     Sleep,
     Apps,
     InstalledApps,
@@ -117,7 +116,6 @@ impl Page {
             Page::Wallpaper => "Wallpaper",
             Page::Accessibility => "Accessibility",
             Page::Battery => "Battery",
-            Page::Usage => "Usage, last 7 days",
             Page::Sleep => "Sleep",
             Page::Apps => "Apps",
             Page::InstalledApps => "Installed apps",
@@ -172,21 +170,18 @@ impl Page {
                     footer: "You can also change this from Quick Settings.",
                 },
             ],
-            Page::Usage => &[
-                Group {
-                    header: "Last 7 days",
-                    rows: &[Row::UsageScreen, Row::UsageApp(0), Row::UsageApp(1), Row::UsageApp(2), Row::UsageApp(3)],
-                    footer: "Estimated from CPU time and time in front. Not a measurement of battery.",
-                },
-            ],
             Page::Battery => &[
-                Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower, Row::UsageLink], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
-                Group { header: "Power settings", rows: &[Row::ScreenTimeout, Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
+                Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
             ],
             Page::Sleep => &[Group {
                 header: "Sleep screen",
                 rows: &[Row::SleepScreen],
                 footer: "Use Launcher pictures, or return to the Kindle screensaver after opening the Kindle UI or restarting.",
+            },
+            Group {
+                header: "Sleep after",
+                rows: &[Row::ScreenTimeout],
+                footer: "How long the screen stays on before the Kindle sleeps. Never keeps it on, which uses more battery.",
             }],
             Page::Apps => &[
                 Group { header: "Management", rows: &[Row::ManageInstalled], footer: "" },
@@ -324,18 +319,12 @@ pub enum Row {
     Warmth,
     DarkMode,
     WallpaperLink,
-    /// Opens the usage page: screen time and the most used apps, for the last seven days.
-    UsageLink,
     Wallpaper(WallpaperTarget),
     Wifi,
     Rotation,
     Animation,
     /// The screen timeout: how long the screen stays on before the Kindle sleeps (quick settings cycle it too).
     ScreenTimeout,
-    /// The Screen on line of the battery usage summary (the last seven days).
-    UsageScreen,
-    /// An app's line of the usage summary, the most used first (0 to 3).
-    UsageApp(u8),
     Ssh,
     SshPassword,
     SshAddress,
@@ -369,23 +358,17 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 46] = [
+    pub const ALL: [Row; 40] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
         Row::WallpaperLink,
-        Row::UsageLink,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
         Row::Wifi,
         Row::Rotation,
         Row::Animation,
         Row::ScreenTimeout,
-        Row::UsageScreen,
-        Row::UsageApp(0),
-        Row::UsageApp(1),
-        Row::UsageApp(2),
-        Row::UsageApp(3),
         Row::Ssh,
         Row::SshPassword,
         Row::SshAddress,
@@ -413,12 +396,9 @@ impl Row {
             Row::Warmth => "Warmth",
             Row::DarkMode => "Dark mode",
             Row::WallpaperLink => "Wallpaper",
-            Row::UsageLink => "Usage, last 7 days",
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
             Row::ScreenTimeout => "Sleep after",
-            Row::UsageScreen => "Screen on",
-            Row::UsageApp(_) => "App",
             Row::Wifi => "Wi-Fi",
             Row::Rotation => "Rotation",
             Row::Ssh => "SSH server (port 2222)",
@@ -597,7 +577,6 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::Hidden => vec![(Button::ShowHidden, Rect::new(r.right() - SWITCH_INSET - 200, r.y + (r.h - SWITCH_H) / 2, 200, SWITCH_H))],
         Row::AppVisibility => vec![(Button::OpenPage(Page::AppVisibility), r)],
         Row::WallpaperLink => vec![(Button::OpenPage(Page::Wallpaper), r)],
-        Row::UsageLink => vec![(Button::OpenPage(Page::Usage), r)],
         Row::Wallpaper(target) => vec![(Button::OpenWallpaperPicker(target), r)],
         Row::ManageInstalled => vec![(Button::ManageInstalled, r)],
         Row::GridColumns => vec![(Button::GridColumns, r)],
@@ -619,7 +598,6 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::DarkMode => vec![(Button::DarkMode, r)],
         Row::Animation => vec![(Button::Animation, r)],
         Row::ScreenTimeout => vec![(Button::ScreenTimeout, r)],
-        Row::UsageScreen | Row::UsageApp(_) => vec![],
         Row::Ssh => vec![(Button::Ssh, r)],
         Row::SshPassword => vec![(Button::SshPassword, r)],
         Row::SshAddress => vec![],
@@ -1425,7 +1403,7 @@ mod tests {
     #[test]
     fn the_battery_and_usage_pages_fit_without_scrolling() {
         let l = oasis();
-        for page in [Page::Battery, Page::Usage] {
+        for page in [Page::Battery, Page::Sleep] {
             let sections = l.page_sections(page);
             let last = sections.last().unwrap();
             assert!(last.card.bottom() < l.height - 300, "{page:?}: the last section must be on screen (bottom {}, height {})", last.card.bottom(), l.height);

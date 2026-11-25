@@ -2030,6 +2030,7 @@ impl Renderer {
         }
         if page == kl_core::layout::Page::Battery {
             self.battery_history(l, s);
+            self.battery_usage(l, s);
         }
         // A result of an action on this page (a Wi-Fi join, an SSH check or password): shown at the bottom on every page.
         if let Some(notice) = ui.notice.clone() {
@@ -2072,8 +2073,7 @@ impl Renderer {
         };
         let label_w = if level.is_some() { (r.w / 3 - 52) as f32 } else { r.w as f32 - 360.0 };
         let text_x = (r.x + 32) as f32;
-        let label = row_label(row.row, s);
-        self.text(Text { text: &label, x: text_x, y: (r.y + 20) as f32, w: label_w, size: 36.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        self.text(Text { text: row.row.label(), x: text_x, y: (r.y + 20) as f32, w: label_w, size: 36.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
         self.text(Text { text: &value, x: text_x, y: (r.y + 66) as f32, w: label_w, size: 27.0, bold: false, align: Align::Start, lines: 1, gray: 85 });
         if let Some(value) = level {
             self.level_bar(kl_core::layout::setting_level_bar(r), value);
@@ -2385,7 +2385,6 @@ fn page_value(page: kl_core::layout::Page, ui: &Ui, s: &Status) -> String {
         Page::InstalledApps => "Review and uninstall apps".into(),
         Page::AppVisibility => format!("{} hidden", ui.hidden_count()),
         Page::Battery => settings_management::battery_status(s),
-        Page::Usage => "Screen time and the most used apps".into(),
         Page::Storage => settings_management::storage_status(ui, s),
         Page::Store if s.low_power && ui.store_daily_check => "Daily update check paused".into(),
         Page::Store => format!("Daily update check {}", onoff(ui.store_daily_check)),
@@ -2411,18 +2410,8 @@ fn wifi_word(s: &Status) -> String {
 }
 
 /// The value a setting row shows.
-/// A row's label: the usage rows name the app they show (their names come from the status).
-fn row_label(row: Row, s: &Status) -> String {
-    match row {
-        Row::UsageApp(i) => s.usage.get(1 + i as usize).map_or("Not used".to_string(), |(name, _)| name.clone()),
-        _ => row.label().to_string(),
-    }
-}
-
 fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
     match row {
-        Row::UsageScreen => s.usage.first().map_or("No use yet".to_string(), |(_, value)| value.clone()),
-        Row::UsageApp(i) => s.usage.get(1 + i as usize).map_or(String::new(), |(_, value)| value.clone()),
         Row::Frontlight => light_description(s.light, s.display_support.front_light),
         Row::Warmth => light_description(s.warmth, s.display_support.warmth),
         Row::LargeText => if s.large_text { "On".into() } else { "Off".into() },
@@ -2431,7 +2420,6 @@ fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
         Row::Wifi => wifi_word(s),
         Row::DarkMode => if s.dark_mode { "On: white on black".into() } else { "Off".into() },
         Row::WallpaperLink => "Home, sleep, and startup pictures".into(),
-        Row::UsageLink => "Screen time and the most used apps".into(),
         Row::Wallpaper(target) => ui.wallpapers.selection(target).label(target).into(),
         Row::Animation => if s.animation { "On: a zoom when an app opens".into() } else { "Off".into() },
         Row::ScreenTimeout => kl_core::settings::screen_timeout_label(s.screen_timeout),
