@@ -23,6 +23,10 @@ pub enum Ev {
     Background { name: String, line: String, ok: bool },
     /// A Wi-Fi scan finished.
     Wifi(kl_core::wifi::WifiInfo),
+    /// The power key was pressed (milliseconds since the launcher started). Read by the launcher's power-key thread.
+    PowerPress(u64),
+    /// The double-press window of a pending power-key press has passed: decide it.
+    PowerTick,
     /// A Wi-Fi join or forget finished: whether it worked, and what to tell the user.
     WifiResult { ok: bool, message: String },
     /// A background SSH job finished (set the password, check the server): what to tell the user.
