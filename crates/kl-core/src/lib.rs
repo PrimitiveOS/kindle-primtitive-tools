@@ -20,7 +20,6 @@ pub mod wallpaper;
 pub mod wifi;
 pub mod models;
 pub mod page_chord;
-pub mod power_button;
 
 pub use apps::{discover, App, IconSource, Launch};
 pub use config::Config;

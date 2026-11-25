@@ -57,16 +57,6 @@ fn set_int(service: &str, prop: &str, value: u32) -> bool {
     ok
 }
 
-/// Put the Kindle to sleep: the power daemon's own power-button path, for a press the launcher has taken.
-pub fn sleep_now() -> bool {
-    set_int(POWERD, "powerButton", 1)
-}
-
-/// Wake the Kindle from the sleep the power daemon started.
-pub fn wake_now() -> bool {
-    set_int(POWERD, "wakeUp", 1)
-}
-
 /// Refresh the active idle timer. Leave the persistent screensaver setting alone.
 pub fn refresh_screen_timeout() -> bool {
     if may_refresh_screen_timeout(

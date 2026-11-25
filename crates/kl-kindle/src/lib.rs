@@ -23,10 +23,6 @@ pub enum Ev {
     Background { name: String, line: String, ok: bool },
     /// A Wi-Fi scan finished.
     Wifi(kl_core::wifi::WifiInfo),
-    /// The power key was pressed (milliseconds since the launcher started). Read by the launcher's power-key thread.
-    PowerPress(u64),
-    /// The double-press window of a pending power-key press has passed: decide it.
-    PowerTick,
     /// A page-turn key was pressed (`down`) or released: the launcher times a hold of both (restart).
     PageKey { code: u16, down: bool },
     /// The two-button hold may be complete: check it.
