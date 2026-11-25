@@ -2419,7 +2419,6 @@ fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
         Row::TextPreview => "Read at your own pace.".into(),
         Row::Wifi => wifi_word(s),
         Row::DarkMode => if s.dark_mode { "On: white on black".into() } else { "Off".into() },
-        Row::WallpaperLink => "Home, sleep, and startup pictures".into(),
         Row::Wallpaper(target) => ui.wallpapers.selection(target).label(target).into(),
         Row::Animation => if s.animation { "On: a zoom when an app opens".into() } else { "Off".into() },
         Row::ScreenTimeout => kl_core::settings::screen_timeout_label(s.screen_timeout),

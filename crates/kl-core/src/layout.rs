@@ -147,7 +147,7 @@ impl Page {
             ],
             Page::Display => &[
                 Group { header: "Brightness", rows: &[Row::Frontlight, Row::Warmth], footer: "" },
-                Group { header: "Appearance", rows: &[Row::DarkMode, Row::WallpaperLink], footer: "Dark mode lightens text against a dark background." },
+                Group { header: "Appearance", rows: &[Row::DarkMode], footer: "Dark mode lightens text against a dark background." },
                 Group { header: "Motion", rows: &[Row::Animation], footer: "A card zooms out of the icon when an app opens." },
                 Group { header: "Screen", rows: &[Row::Rotation], footer: "Turns with the Kindle while Auto is on. Tap the value to set it by hand." },
             ],
@@ -214,11 +214,14 @@ impl Page {
 }
 
 /// The Settings list: its groups, each a header, a card of pages, and nothing under it.
+/// The Settings list, grouped as on iPhone: connectivity, then the screen, then the battery, then the apps, then the
+/// device itself. Each group keeps its pages in the order they are used.
 const SETTINGS_GROUPS: &[(&str, &[Page])] = &[
-    ("Power and display", &[Page::Battery, Page::Display, Page::Accessibility, Page::Sleep]),
     ("Network", &[Page::Wifi, Page::Connection, Page::FileTransfer]),
+    ("Display", &[Page::Display, Page::Wallpaper, Page::Accessibility, Page::Sleep]),
+    ("Battery", &[Page::Battery]),
     ("Applications", &[Page::Apps, Page::Store]),
-    ("System", &[Page::Storage, Page::Device, Page::DateTime, Page::About]),
+    ("Device", &[Page::Device, Page::About, Page::Storage, Page::DateTime]),
 ];
 
 /// A group of the Settings list: its header, its card, and the page rows in it.
@@ -318,7 +321,6 @@ pub enum Row {
     Frontlight,
     Warmth,
     DarkMode,
-    WallpaperLink,
     Wallpaper(WallpaperTarget),
     Wifi,
     Rotation,
@@ -358,11 +360,10 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 40] = [
+    pub const ALL: [Row; 39] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
-        Row::WallpaperLink,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
         Row::Wifi,
@@ -395,7 +396,6 @@ impl Row {
             Row::Frontlight => "Front light",
             Row::Warmth => "Warmth",
             Row::DarkMode => "Dark mode",
-            Row::WallpaperLink => "Wallpaper",
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
             Row::ScreenTimeout => "Sleep after",
@@ -576,7 +576,6 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         ],
         Row::Hidden => vec![(Button::ShowHidden, Rect::new(r.right() - SWITCH_INSET - 200, r.y + (r.h - SWITCH_H) / 2, 200, SWITCH_H))],
         Row::AppVisibility => vec![(Button::OpenPage(Page::AppVisibility), r)],
-        Row::WallpaperLink => vec![(Button::OpenPage(Page::Wallpaper), r)],
         Row::Wallpaper(target) => vec![(Button::OpenWallpaperPicker(target), r)],
         Row::ManageInstalled => vec![(Button::ManageInstalled, r)],
         Row::GridColumns => vec![(Button::GridColumns, r)],
@@ -1423,15 +1422,15 @@ mod tests {
         let d = l.done_button();
         assert_eq!(l.settings_button_at(Page::Display, (d.x + 1) as f32, (d.y + 1) as f32), Some(Button::Done));
         let top = l.settings_home_rows(0);
-        assert_eq!(top.len() + 3, Page::ALL.len()); // App visibility, Installed apps and Wallpaper are nested.
+        assert_eq!(top.len() + 2, Page::ALL.len()); // App visibility and Installed apps are nested.
         let viewport = l.settings_viewport();
         assert!(top.last().unwrap().1.bottom() > viewport.bottom());
         let scroll = l.settings_scroll_max();
         let bottom = l.settings_home_rows(scroll);
         let (page, r) = *bottom.last().unwrap();
-        assert_eq!(page, Page::About);
+        assert_eq!(page, Page::DateTime);
         assert!(r.bottom() <= viewport.bottom());
-        assert_eq!(l.settings_home_at(scroll, (r.x + 5) as f32, (r.y + 5) as f32), Some(Page::About));
+        assert_eq!(l.settings_home_at(scroll, (r.x + 5) as f32, (r.y + 5) as f32), Some(Page::DateTime));
         assert_eq!(l.settings_home_at(scroll, 50.0, (viewport.y - 1) as f32), None);
         assert_eq!(l.visibility_at(200, 50.0, (l.visibility_viewport().y - 1) as f32), None);
         assert_eq!(l.visibility_at(200, 50.0, l.visibility_viewport().y as f32), Some(1));

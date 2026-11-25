@@ -2426,9 +2426,8 @@ mod tests {
         u.open_settings();
         let row = |u: &Ui, page, label| u.layout.page_sections(page).into_iter()
             .flat_map(|section| section.rows).find(|item| item.row == label).unwrap().rect;
-        let display = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Display).unwrap().1;
-        u.handle(centre(display));
-        u.handle(centre(row(&u, Page::Display, Row::WallpaperLink)));
+        let wallpaper = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Wallpaper).unwrap().1;
+        u.handle(centre(wallpaper));
         assert_eq!(u.screen, Screen::Page(Page::Wallpaper));
         let target = WallpaperTarget::Sleep;
         u.handle(centre(row(&u, Page::Wallpaper, Row::Wallpaper(target))));
@@ -2457,7 +2456,7 @@ mod tests {
         assert_eq!(u.wallpaper_scroll, 0);
         assert_eq!(u.handle(centre(u.layout.wallpaper_preview().apply)), Action::None);
         u.handle(Input::PageBack);
-        for expected in [Screen::Page(Page::Wallpaper), Screen::Page(Page::Display), Screen::Settings]
+        for expected in [Screen::Page(Page::Wallpaper), Screen::Settings]
         {
             u.handle(centre(u.layout.done_button()));
             assert_eq!(u.screen, expected);
