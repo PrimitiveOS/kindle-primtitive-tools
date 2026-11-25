@@ -176,6 +176,7 @@ impl Page {
                 },
             ],
             Page::Battery => &[
+                Group { header: "Usage, last 7 days", rows: &[Row::UsageScreen, Row::UsageApp(0), Row::UsageApp(1), Row::UsageApp(2), Row::UsageApp(3)], footer: "Estimated from CPU time and time in front. Not a measurement of battery." },
                 Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
                 Group { header: "Power settings", rows: &[Row::ScreenTimeout, Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
             ],
@@ -326,6 +327,10 @@ pub enum Row {
     Animation,
     /// The screen timeout: how long the screen stays on before the Kindle sleeps (quick settings cycle it too).
     ScreenTimeout,
+    /// The Screen on line of the battery usage summary (the last seven days).
+    UsageScreen,
+    /// An app's line of the usage summary, the most used first (0 to 3).
+    UsageApp(u8),
     Ssh,
     SshPassword,
     SshAddress,
@@ -359,7 +364,7 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 41] = [
+    pub const ALL: [Row; 46] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
@@ -371,6 +376,11 @@ impl Row {
         Row::Rotation,
         Row::Animation,
         Row::ScreenTimeout,
+        Row::UsageScreen,
+        Row::UsageApp(0),
+        Row::UsageApp(1),
+        Row::UsageApp(2),
+        Row::UsageApp(3),
         Row::Ssh,
         Row::SshPassword,
         Row::SshAddress,
@@ -401,6 +411,8 @@ impl Row {
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
             Row::ScreenTimeout => "Sleep after",
+            Row::UsageScreen => "Screen on",
+            Row::UsageApp(_) => "App",
             Row::Wifi => "Wi-Fi",
             Row::Rotation => "Rotation",
             Row::Ssh => "SSH server (port 2222)",
@@ -600,6 +612,7 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::DarkMode => vec![(Button::DarkMode, r)],
         Row::Animation => vec![(Button::Animation, r)],
         Row::ScreenTimeout => vec![(Button::ScreenTimeout, r)],
+        Row::UsageScreen | Row::UsageApp(_) => vec![],
         Row::Ssh => vec![(Button::Ssh, r)],
         Row::SshPassword => vec![(Button::SshPassword, r)],
         Row::SshAddress => vec![],

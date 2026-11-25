@@ -2072,7 +2072,8 @@ impl Renderer {
         };
         let label_w = if level.is_some() { (r.w / 3 - 52) as f32 } else { r.w as f32 - 360.0 };
         let text_x = (r.x + 32) as f32;
-        self.text(Text { text: row.row.label(), x: text_x, y: (r.y + 20) as f32, w: label_w, size: 36.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        let label = row_label(row.row, s);
+        self.text(Text { text: &label, x: text_x, y: (r.y + 20) as f32, w: label_w, size: 36.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
         self.text(Text { text: &value, x: text_x, y: (r.y + 66) as f32, w: label_w, size: 27.0, bold: false, align: Align::Start, lines: 1, gray: 85 });
         if let Some(value) = level {
             self.level_bar(kl_core::layout::setting_level_bar(r), value);
@@ -2409,8 +2410,18 @@ fn wifi_word(s: &Status) -> String {
 }
 
 /// The value a setting row shows.
+/// A row's label: the usage rows name the app they show (their names come from the status).
+fn row_label(row: Row, s: &Status) -> String {
+    match row {
+        Row::UsageApp(i) => s.usage.get(1 + i as usize).map_or("Not used".to_string(), |(name, _)| name.clone()),
+        _ => row.label().to_string(),
+    }
+}
+
 fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
     match row {
+        Row::UsageScreen => s.usage.first().map_or("No use yet".to_string(), |(_, value)| value.clone()),
+        Row::UsageApp(i) => s.usage.get(1 + i as usize).map_or(String::new(), |(_, value)| value.clone()),
         Row::Frontlight => light_description(s.light, s.display_support.front_light),
         Row::Warmth => light_description(s.warmth, s.display_support.warmth),
         Row::LargeText => if s.large_text { "On".into() } else { "Off".into() },

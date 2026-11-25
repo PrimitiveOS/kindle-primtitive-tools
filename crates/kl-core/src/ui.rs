@@ -236,6 +236,8 @@ pub struct Status {
     pub animation: bool,
     /// Seconds the screen stays on before the Kindle sleeps (0 = never).
     pub screen_timeout: u32,
+    /// The battery usage summary lines: index 0 is the screen line, 1 to 4 the most used apps (name, value).
+    pub usage: Vec<(String, String)>,
     pub rotation: Rotation,
     /// Free memory for the About text, e.g. "MemAvailable 312 MB".
     pub memory: String,

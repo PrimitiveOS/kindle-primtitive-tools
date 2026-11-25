@@ -273,6 +273,7 @@ pub fn status(settings: &Settings) -> Status {
         dark_mode: settings.dark_mode,
         animation: settings.animation,
         screen_timeout: settings.screen_timeout,
+        usage: Vec::new(),
         large_text: settings.large_text,
         high_contrast: settings.high_contrast,
         wifi_on,
