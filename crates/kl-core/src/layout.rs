@@ -157,11 +157,6 @@ impl Page {
                     rows: &[Row::Wallpaper(WallpaperTarget::Home), Row::Wallpaper(WallpaperTarget::Sleep)],
                     footer: "The Sleep Screen picture is used when the Kindle goes to sleep with Launcher open.",
                 },
-                Group {
-                    header: "Startup",
-                    rows: &[Row::Wallpaper(WallpaperTarget::Startup)],
-                    footer: "Shown after the Kindle startup screen when Launcher is set to start automatically.",
-                },
             ],
             Page::Accessibility => &[
                 Group {
@@ -364,14 +359,13 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 46] = [
+    pub const ALL: [Row; 45] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
         Row::WallpaperLink,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
-        Row::Wallpaper(WallpaperTarget::Startup),
         Row::Wifi,
         Row::Rotation,
         Row::Animation,
