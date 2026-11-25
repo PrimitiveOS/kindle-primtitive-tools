@@ -68,6 +68,8 @@ pub enum Input {
     PowerSingle,
     /// The power key was pressed twice within the window: confirm, then restart the launcher.
     PowerDouble,
+    /// Both page-turn buttons were held for two seconds: confirm, then restart the launcher.
+    RestartHold,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1736,6 +1738,10 @@ impl Ui {
             return Action::None;
         }
         match input {
+            Input::RestartHold => {
+                self.go(Screen::ConfirmRestart);
+                return Action::Redraw { full: true };
+            }
             Input::PowerSingle => {
                 return Action::Device(if self.screen == Screen::Sleep { DeviceCmd::WakeNow } else { DeviceCmd::SleepNow });
             }
@@ -3097,6 +3103,13 @@ mod tests {
         u.handle(Input::PowerDouble);
         let restart_at = (restart.x as f32 + 4.0, restart.y as f32 + 4.0);
         assert_eq!(u.handle(Input::Tap(restart_at.0, restart_at.1)), Action::Device(DeviceCmd::QuitAppAndRestart));
+    }
+
+    #[test]
+    fn holding_both_page_buttons_asks_before_restarting_the_launcher() {
+        let mut u = ui(0);
+        assert_eq!(u.handle(Input::RestartHold), Action::Redraw { full: true });
+        assert_eq!(u.screen, Screen::ConfirmRestart);
     }
 
     #[test]

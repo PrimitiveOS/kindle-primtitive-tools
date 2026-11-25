@@ -13,7 +13,14 @@ pub fn touch_loop(path: String, tx: Sender<Ev>) {
 }
 
 pub fn button_loop(path: String, tx: Sender<Ev>) {
-    primitive_input::button_loop(path, |input| {
-        let _ = tx.send(Ev::Input(input));
-    });
+    let keys = tx.clone();
+    primitive_input::button_loop_keys(
+        path,
+        |input| {
+            let _ = tx.send(Ev::Input(input));
+        },
+        |code, down| {
+            let _ = keys.send(Ev::PageKey { code, down });
+        },
+    );
 }
