@@ -13,7 +13,7 @@ mod font_fallback_tests;
 use std::collections::HashMap;
 
 use kl_core::{
-    layout::{Button, QuickTile, Rect, Row, LABEL_SIZE, QUICK_LEVEL_MAX},
+    layout::{Button, HeaderIcon, QuickTile, Rect, Row, LABEL_SIZE, QUICK_LEVEL_MAX},
     wallpaper::{WallpaperChoice, WallpaperDraft, WallpaperTarget},
     App, IconSource, Launch, Layout, Rotation, Screen, Status, Ui,
 };
@@ -672,6 +672,8 @@ impl Renderer {
             Screen::WallpaperPicker(target) => self.settings_wallpaper_picker(ui, target),
             Screen::WallpaperPreview => {},
             Screen::NetworkDetail => self.network_detail(ui),
+            Screen::BluetoothDevice => self.bluetooth_device(ui),
+            Screen::BluetoothConfirm => self.bluetooth_confirm(ui),
             Screen::Password => self.password_screen(ui),
             Screen::NetworkName => self.network_name_screen(ui),
             Screen::SshPassword => self.ssh_password_screen(ui),
@@ -843,8 +845,12 @@ impl Renderer {
         }
         let w = l.header_wifi();
         self.wifi_icon(w.x as f64, w.y as f64, 64.0, wifi_lit(s));
-        // Text and badges to the left of Wi-Fi, laid out from right to left; `right` is the left edge of what is drawn.
-        let mut right = w.x - 20;
+        self.ssh_header_icon(l, s);
+        self.bluetooth_header_icon(l, s);
+        self.headphones_header_icon(l, s);
+        // Text and badges to the left of the icons, laid out from right to left; `right` is the left edge of what is
+        // drawn.
+        let mut right = header_left(l, s) - 20;
         if s.wifi_on && s.wifi_state != "connected" {
             let note = if s.wifi_state.is_empty() { "Wi-Fi …".to_string() } else { "No network".to_string() };
             let width = self.text_width(&note, 30.0, false);
@@ -855,13 +861,30 @@ impl Renderer {
         if running > 0 {
             right -= self.badge_width("Running") as i32;
             self.badge(right as f64, "Running");
-            right -= 12;
-        }
-        if s.ssh {
-            right -= self.badge_width("SSH") as i32;
-            self.badge(right as f64, "SSH");
         }
         self.fill(Rect::new(0, r.bottom() - 2, r.w, 2), BLACK);
+    }
+
+    /// The SSH indicator (a terminal prompt) beside the Wi-Fi icon, in the status bar and quick settings. Drawn only
+    /// while the SSH server runs.
+    fn ssh_header_icon(&mut self, l: &Layout, s: &Status) {
+        if let Some(k) = l.header_rect(HeaderIcon::Ssh, s.ssh, s.bluetooth_on, headphones_on(s)) {
+            self.draw_icon(primitive_quick::icons::SSH, k.x as f64, k.y as f64, 64.0, BLACK);
+        }
+    }
+
+    /// The headphones in the status bar and quick settings, after the Bluetooth icon, while Bluetooth audio is connected.
+    fn headphones_header_icon(&mut self, l: &Layout, s: &Status) {
+        if let Some(k) = l.header_rect(HeaderIcon::Headphones, s.ssh, s.bluetooth_on, headphones_on(s)) {
+            self.draw_icon(primitive_quick::icons::HEADPHONES, k.x as f64, k.y as f64, 64.0, BLACK);
+        }
+    }
+
+    /// The Bluetooth indicator (a rune) in the status bar and quick settings. Drawn only while Bluetooth is on.
+    fn bluetooth_header_icon(&mut self, l: &Layout, s: &Status) {
+        if let Some(k) = l.header_rect(HeaderIcon::Bluetooth, s.ssh, s.bluetooth_on, headphones_on(s)) {
+            self.draw_icon(primitive_quick::icons::BLUETOOTH, k.x as f64, k.y as f64, 64.0, BLACK);
+        }
     }
 
     /// The width a badge with `label` takes.
@@ -895,6 +918,9 @@ impl Renderer {
         }
         let w = l.header_wifi();
         self.wifi_icon(w.x as f64, w.y as f64, 64.0, wifi_lit(s));
+        self.ssh_header_icon(l, s);
+        self.bluetooth_header_icon(l, s);
+        self.headphones_header_icon(l, s);
         // Round icon buttons, above the sliders: black with a white icon when on, outlined when off, with a small
         // caption underneath.
         for (tile, slot) in l.quick_buttons() {
@@ -907,6 +933,7 @@ impl Renderer {
                 QuickTile::DarkMode => ("Dark mode".into(), s.dark_mode),
                 QuickTile::Animation => ("Animation".into(), s.animation),
                 QuickTile::Ssh => ("SSH".into(), s.ssh),
+                QuickTile::Bluetooth => ("Bluetooth".into(), s.bluetooth_on),
                 QuickTile::AllSettings => ("Settings".into(), false),
                 QuickTile::ScreenTimeout => (kl_core::settings::screen_timeout_label(s.screen_timeout), s.screen_timeout == 0),
                 QuickTile::Power => ("Power".into(), false),
@@ -925,6 +952,7 @@ impl Renderer {
                 QuickTile::Animation => primitive_quick::icons::ANIMATION,
                 QuickTile::ScreenTimeout => TIMER_ICON,
                 QuickTile::Ssh => primitive_quick::icons::SSH,
+                QuickTile::Bluetooth => primitive_quick::icons::BLUETOOTH,
                 QuickTile::AllSettings => primitive_quick::icons::SETTINGS,
                 QuickTile::Power => POWER_ICON,
             };
@@ -2129,6 +2157,9 @@ impl Renderer {
         if page == kl_core::layout::Page::Wifi {
             self.wifi_list(ui, s);
         }
+        if page == kl_core::layout::Page::Bluetooth {
+            self.bluetooth_list(ui, s);
+        }
         if page == kl_core::layout::Page::Battery {
             self.battery_history(l, s);
             self.battery_usage(l, s);
@@ -2208,6 +2239,7 @@ impl Renderer {
                 Button::Restart => {}
                 Button::Rotation => {}
                 Button::Wifi => self.switch(switch_rect(r), s.wifi_on),
+                Button::Bluetooth => self.switch(switch_rect(r), s.bluetooth_on),
                 Button::DarkMode => self.switch(switch_rect(r), s.dark_mode),
                 Button::Animation => self.switch(switch_rect(r), s.animation),
                 Button::LargeText => self.switch(switch_rect(r), s.large_text),
@@ -2286,6 +2318,106 @@ impl Renderer {
             let thumb_y = track.y + (track.h - thumb_h) * ui.wifi_scroll as i32 / max_scroll;
             self.rounded(Rect::new(track.x, thumb_y, track.w, thumb_h), 3.0, BLACK);
         }
+    }
+
+    /// The Bluetooth page's list: the Devices header with its Scan button, then the devices (connected, paired, and
+    /// nearby audio). Addresses are never drawn.
+    fn bluetooth_list(&mut self, ui: &Ui, s: &Status) {
+        let l = ui.layout;
+        let area = l.bt_area();
+        self.section_header(area.list.x, area.header, "Devices");
+        if s.bluetooth_on {
+            self.button(area.scan, if ui.bt_scanning { "Scanning…" } else { "Scan" }, false);
+            self.button(l.bt_test_button(), "Test sound", false);
+        }
+        self.card(area.list);
+        let devices = &ui.bt.devices;
+        if devices.is_empty() {
+            let text = if !s.bluetooth_on {
+                "Bluetooth is off. Turn it on to find headphones and speakers."
+            } else if ui.bt_scanning {
+                "Looking for devices… Put headphones or a speaker in pairing mode."
+            } else {
+                "No headphones or speakers found. Put one in pairing mode, then tap Scan."
+            };
+            self.text(Text { text, x: (area.list.x + 32) as f32, y: (area.list.y + 36) as f32, w: area.list.w as f32 - 64.0, size: 30.0, bold: false, align: Align::Start, lines: 2, gray: 85 });
+            return;
+        }
+        for i in 0..area.visible {
+            let Some(dev) = devices.get(ui.bt_scroll + i) else { break };
+            let r = l.bt_row(i);
+            let name_w = (r.w - 160) as f32;
+            self.text(Text { text: dev.label(), x: (r.x + 32) as f32, y: (r.y + 18) as f32, w: name_w, size: 34.0, bold: false, align: Align::Start, lines: 1, gray: BLACK });
+            let state = if dev.connected { "Connected" } else if dev.paired { "Paired" } else { "Nearby" };
+            self.text(Text { text: state, x: (r.x + 32) as f32, y: (r.y + 60) as f32, w: name_w, size: 24.0, bold: false, align: Align::Start, lines: 1, gray: 85 });
+            self.text(Text { text: "›", x: (r.right() - 52) as f32, y: (r.y + 30) as f32, w: 40.0, size: 52.0, bold: true, align: Align::End, lines: 1, gray: BLACK });
+            if i + 1 < area.visible && ui.bt_scroll + i + 1 < devices.len() {
+                self.hairline(r.bottom() - 1, r.x + 32, r.right() - 32);
+            }
+        }
+        // A scroll bar when the list is longer than the window.
+        if devices.len() > area.visible {
+            let track = Rect::new(area.list.right() - 16, area.list.y + 16, 6, area.list.h - 32);
+            self.fill(track, 200);
+            let len = devices.len() as i32;
+            let shown = area.visible as i32;
+            let thumb_h = (track.h * shown / len).max(48);
+            let max_scroll = (len - shown).max(1);
+            let thumb_y = track.y + (track.h - thumb_h) * ui.bt_scroll as i32 / max_scroll;
+            self.rounded(Rect::new(track.x, thumb_y, track.w, thumb_h), 3.0, BLACK);
+        }
+    }
+
+    /// One Bluetooth device: its status, kind and signal, and the action for its state (Pair, Connect or
+    /// Disconnect), with Forget for a paired one.
+    fn bluetooth_device(&mut self, ui: &Ui) {
+        let l = ui.layout;
+        let title = l.title();
+        let Some(dev) = ui.bt_target.as_ref().and_then(|a| ui.bt.find(a)).cloned() else { return };
+        let name_w = (l.done_button().x - 80) as f32;
+        self.text(Text { text: dev.label(), x: 40.0, y: 36.0, w: name_w, size: 56.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        self.button(l.done_button(), "Back", true);
+        self.fill(Rect::new(0, title.bottom() - 4, title.w, 4), BLACK);
+        let card = Rect::new(MARGIN_X, l.title().bottom() + 40, self.width as i32 - 2 * MARGIN_X, 3 * 96);
+        self.card(card);
+        let state = if dev.connected { "Connected" } else if dev.paired { "Paired" } else { "Nearby" };
+        let kind = if dev.is_audio() { "Headphones or speaker" } else { "Other device" };
+        let signal = dev.rssi.map(|r| format!("{r} dBm")).unwrap_or_else(|| "Not seen now".into());
+        let rows = [("Status", state.to_string()), ("Kind", kind.to_string()), ("Signal", signal)];
+        for (i, (key, value)) in rows.iter().enumerate() {
+            let r = Rect::new(card.x, card.y + i as i32 * 96, card.w, 96);
+            self.text(Text { text: key, x: (r.x + 32) as f32, y: (r.y + 32) as f32, w: 400.0, size: 32.0, bold: false, align: Align::Start, lines: 1, gray: BLACK });
+            self.text(Text { text: value, x: (r.x + 32) as f32, y: (r.y + 32) as f32, w: (r.w - 64) as f32, size: 32.0, bold: true, align: Align::End, lines: 1, gray: BLACK });
+            if i + 1 < rows.len() {
+                self.hairline(r.bottom() - 1, r.x + 32, r.right() - 32);
+            }
+        }
+        let primary = if !dev.paired { "Pair" } else if dev.connected { "Disconnect" } else { "Connect" };
+        self.button(l.net_connect(), primary, true);
+        if dev.paired {
+            self.button(l.net_forget(), "Forget this device", false);
+        }
+        if let Some(notice) = ui.notice.clone() {
+            self.text(Text { text: &notice, x: MARGIN_X as f32, y: (l.height - 120) as f32, w: (l.width - 2 * MARGIN_X) as f32, size: 30.0, bold: false, align: Align::Start, lines: 2, gray: BLACK });
+        }
+    }
+
+    /// The pairing confirmation: the device's name, the code it shows (when the stack sent one), and Pair or Cancel.
+    fn bluetooth_confirm(&mut self, ui: &Ui) {
+        let l = ui.layout;
+        let title = l.title();
+        let name = ui.bt_target.as_ref().and_then(|a| ui.bt.find(a)).map(|d| d.label().to_string()).unwrap_or_default();
+        self.text(Text { text: "Pair", x: 40.0, y: 36.0, w: 700.0, size: 56.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        self.button(l.done_button(), "Back", true);
+        self.fill(Rect::new(0, title.bottom() - 4, title.w, 4), BLACK);
+        let question = format!("Pair with {name}?");
+        self.text(Text { text: &question, x: MARGIN_X as f32, y: (l.title().bottom() + 40) as f32, w: (l.width - 2 * MARGIN_X) as f32, size: 40.0, bold: true, align: Align::Start, lines: 2, gray: BLACK });
+        if !ui.bt_code.is_empty() {
+            self.text(Text { text: "Check that the device shows the same code before you tap Pair.", x: MARGIN_X as f32, y: (l.title().bottom() + 112) as f32, w: (l.width - 2 * MARGIN_X) as f32, size: 28.0, bold: false, align: Align::Start, lines: 2, gray: 85 });
+            self.text(Text { text: &ui.bt_code, x: MARGIN_X as f32, y: (l.title().bottom() + 190) as f32, w: (l.width - 2 * MARGIN_X) as f32, size: 64.0, bold: true, align: Align::Start, lines: 2, gray: BLACK });
+        }
+        self.button(l.net_connect(), "Pair", true);
+        self.button(l.net_forget(), "Cancel", false);
     }
 
     /// System, Launcher version and device details, as key and value rows.
@@ -2477,6 +2609,7 @@ fn page_value(page: kl_core::layout::Page, ui: &Ui, s: &Status) -> String {
     let onoff = |on: bool| if on { "on" } else { "off" };
     match page {
         Page::Wifi => wifi_word(s),
+        Page::Bluetooth => bluetooth_word(s),
         Page::ChooseModel => "Detected or chosen".into(),
         Page::Display => format!("Front light {} · Dark mode {}", light_description(s.light, s.display_support.front_light), onoff(s.dark_mode)),
         Page::Wallpaper => "Home, sleep, and startup pictures".into(),
@@ -2501,6 +2634,25 @@ fn light_description(level: u32, available: bool) -> String {
     if available { format!("{level} / {QUICK_LEVEL_MAX}") } else { "Unavailable".into() }
 }
 
+/// The Bluetooth state as a word: Off, On, or On with the connected device's name.
+fn bluetooth_word(s: &Status) -> String {
+    match (s.bluetooth_on, s.bluetooth_connected.as_deref()) {
+        (false, _) => "Off".into(),
+        (true, Some(name)) => format!("Connected to {name}"),
+        (true, None) => "On".into(),
+    }
+}
+
+/// The left edge of the status bar's icons (the last one of the queue; see `Layout::header_queue`).
+fn header_left(l: &Layout, s: &Status) -> i32 {
+    l.header_left(s.ssh, s.bluetooth_on, headphones_on(s))
+}
+
+/// The headphones show while Bluetooth audio is connected (the connected device's name is known).
+fn headphones_on(s: &Status) -> bool {
+    s.bluetooth_on && s.bluetooth_connected.is_some()
+}
+
 /// The Wi-Fi state as a word: Off, On, or the network state.
 fn wifi_word(s: &Status) -> String {
     match (s.wifi_on, s.wifi_state.as_str()) {
@@ -2519,6 +2671,7 @@ fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
         Row::HighContrast => if s.high_contrast { "On".into() } else { "Off".into() },
         Row::TextPreview => "Read at your own pace.".into(),
         Row::Wifi => wifi_word(s),
+        Row::Bluetooth => bluetooth_word(s),
         Row::DarkMode => if s.dark_mode { "On: white on black".into() } else { "Off".into() },
         Row::Wallpaper(target) => ui.wallpapers.selection(target).label(target).into(),
         Row::Animation => if s.animation { "On: a zoom when an app opens".into() } else { "Off".into() },
