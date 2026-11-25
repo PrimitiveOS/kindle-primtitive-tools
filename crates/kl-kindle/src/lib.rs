@@ -29,6 +29,12 @@ pub enum Ev {
     ChordTick,
     /// A Wi-Fi join or forget finished: whether it worked, and what to tell the user.
     WifiResult { ok: bool, message: String },
+    /// Bluetooth's state and devices: after a scan, a change, or a pairing step.
+    Bluetooth(kl_core::bluetooth::BtInfo),
+    /// A Bluetooth result or error for the notice line (it never carries an address).
+    BluetoothNotice(String),
+    /// The stack asks to confirm a pairing: the text it sent (the code, when the device shows one).
+    BluetoothConfirm(String),
     /// A background SSH job finished (set the password, check the server): what to tell the user.
     Notice(String),
     /// The catalog refresh finished. A failed refresh leaves the currently displayed catalog in place.

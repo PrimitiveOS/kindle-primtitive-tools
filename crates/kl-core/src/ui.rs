@@ -8,6 +8,7 @@ use crate::{
     apps::{extensions_app, sort_key, App, IconSource, Launch},
     kual::MenuItem,
     battery::{self, Warning},
+    bluetooth::{BdAddr, BtInfo},
     layout::{Button, Layout, Page, QuickTile, Rect},
     settings::Rotation,
     store::StoreTab,
@@ -38,6 +39,10 @@ pub enum Screen {
     WallpaperPreview,
     /// One network from the Wi-Fi scan: connect, or forget a saved one.
     NetworkDetail,
+    /// One Bluetooth device: pair, connect, disconnect or forget it. The device is `Ui::bt_target`.
+    BluetoothDevice,
+    /// The pairing confirmation: "Pair with …?" with the code the device shows (`Ui::bt_code`).
+    BluetoothConfirm,
     /// The password of a new secured network, typed on the on-screen keyboard.
     Password,
     /// The name of a network that is not in the list (a hidden network), typed on the keyboard.
@@ -87,6 +92,8 @@ pub enum DeviceCmd {
     Light(i32),
     Warmth(i32),
     ToggleWifi,
+    /// Bluetooth on (the stack starts, then scans) or off (the stack restarts).
+    ToggleBluetooth,
     ToggleRotation,
     ToggleSsh,
     /// Settings > DNS: public DNS on or off (the network's servers back).
@@ -159,6 +166,19 @@ pub enum Action {
     JoinWifi { name: String, secured: bool, password: Option<String>, saved: bool },
     /// Forget a saved network (delete its profile).
     ForgetWifi(String),
+    /// Scan for nearby devices and read the lists (the Bluetooth page opening or its Scan button). The driver sends
+    /// the result back as `set_bluetooth`.
+    ScanBluetooth,
+    /// Pair with a nearby device (the stack asks for a confirmation, which the driver reports back).
+    PairBluetooth(BdAddr),
+    /// The answer to the pairing confirmation: yes (true) or no (false).
+    ConfirmBluetooth(bool),
+    ConnectBluetooth(BdAddr),
+    DisconnectBluetooth(BdAddr),
+    /// Remove a paired device.
+    ForgetBluetooth(BdAddr),
+    /// Play a short test tone through the connected headphones (the stock audio manager plays it).
+    TestBluetoothSound,
     /// Set the root password the SSH server checks, from the SSH password screen. The driver gives it to the
     /// device on stdin only: it is not logged, kept, or put in a command line.
     SetSshPassword(String),
@@ -224,6 +244,10 @@ pub struct Status {
     pub wifi_state: String,
     /// Signal strength while connected: (level, out of), from `signalStrength` ("4/5").
     pub wifi_signal: Option<(u32, u32)>,
+    /// Bluetooth is on (the stack's state 1 or 2).
+    pub bluetooth_on: bool,
+    /// The name of the connected Bluetooth device, when one is connected.
+    pub bluetooth_connected: Option<String>,
     pub light: u32,
     pub warmth: u32,
     pub display_support: DisplaySupport,
@@ -269,6 +293,8 @@ impl Status {
             || self.wifi_state != other.wifi_state
             || self.wifi_signal != other.wifi_signal
             || self.display_differs(other)
+            || self.bluetooth_on != other.bluetooth_on
+            || self.bluetooth_connected != other.bluetooth_connected
             || self.ssh != other.ssh
             || self.ssh_address != other.ssh_address
             || self.ssh_password_set != other.ssh_password_set
@@ -295,6 +321,8 @@ impl Status {
             || self.wifi_on != other.wifi_on
             || self.wifi_state != other.wifi_state
             || self.wifi_signal != other.wifi_signal
+            || self.bluetooth_on != other.bluetooth_on
+            || self.bluetooth_connected != other.bluetooth_connected
             || self.ssh != other.ssh
     }
 }
@@ -471,6 +499,16 @@ pub struct Ui {
     /// password then joins it as an open network).
     pub network_name: primitive_keyboard::Editor,
     pub wifi_hidden: bool,
+    /// Bluetooth: the radio and the devices (set by the driver), whether a scan runs, the list's scroll, the device
+    /// the device screen is for, and the code the device shows for a pairing confirmation.
+    pub bt: BtInfo,
+    pub bt_scanning: bool,
+    pub bt_scroll: usize,
+    pub bt_target: Option<BdAddr>,
+    pub bt_code: String,
+    /// The SSH icon is in the status bar. The launcher sets it before each input, because the Bluetooth icon moves
+    /// beside it (the icons stack from the right).
+    pub ssh_shown: bool,
     /// The SSH password being typed (kept here only until Set; never logged).
     pub ssh_password: primitive_keyboard::Editor,
     /// The device name being typed, and the saved name and the About page's values.
@@ -560,6 +598,12 @@ impl Ui {
             show_password: false,
             network_name: primitive_keyboard::Editor::new(MAX_NAME),
             wifi_hidden: false,
+            bt: BtInfo::default(),
+            bt_scanning: false,
+            bt_scroll: 0,
+            bt_target: None,
+            bt_code: String::new(),
+            ssh_shown: false,
             ssh_password: primitive_keyboard::Editor::new(MAX_SSH_PASSWORD),
             device_name_entry: primitive_keyboard::Editor::new(MAX_DEVICE_NAME),
             device_name: None,
@@ -650,6 +694,99 @@ impl Ui {
     /// How far the scan list can scroll: its networks, less the rows that fit.
     fn wifi_max_scroll(&self) -> usize {
         self.wifi.networks.len().saturating_sub(self.layout.wifi_area().visible)
+    }
+
+    /// Bluetooth: the radio and the devices, from the driver (after a scan, a change, or a pairing answer). A device
+    /// the device screen is for, and that is gone now (forgotten), returns to the Bluetooth page.
+    pub fn set_bluetooth(&mut self, info: BtInfo) {
+        self.bt = info;
+        self.bt_scanning = false;
+        self.bt_scroll = self.bt_scroll.min(self.bt_max_scroll());
+        let gone = self.bt_target.as_ref().is_some_and(|addr| self.bt.find(addr).is_none());
+        if gone {
+            self.bt_target = None;
+            if self.screen == Screen::BluetoothDevice {
+                self.screen = Screen::Page(Page::Bluetooth);
+            }
+        }
+    }
+
+    /// The Bluetooth result or error for the notice line. It never carries a device address.
+    pub fn set_bluetooth_notice(&mut self, message: String) {
+        self.notice = Some(message);
+    }
+
+    /// The stack asks to confirm a pairing: show the code (or the device's question) on the confirmation screen.
+    pub fn ask_bluetooth_confirmation(&mut self, code: String) {
+        self.bt_code = code;
+        self.screen = Screen::BluetoothConfirm;
+        self.notice = None;
+    }
+
+    fn bt_max_scroll(&self) -> usize {
+        self.bt.devices.len().saturating_sub(self.layout.bt_area().visible)
+    }
+
+    /// The Bluetooth switch: on or off. Turning it on scans as the page opens; turning it off stops the scan.
+    fn toggle_bluetooth(&mut self) -> Action {
+        self.notice = Some(if self.bt.on { "Turning Bluetooth off…" } else { "Turning Bluetooth on…" }.into());
+        if !self.bt.on {
+            self.bt_scanning = true;
+        }
+        Action::Device(DeviceCmd::ToggleBluetooth)
+    }
+
+    /// The Bluetooth device screen: Pair for a new device, Connect or Disconnect for a paired one, and Forget for a
+    /// paired one. Back returns to the Bluetooth page.
+    fn bluetooth_device(&mut self, input: Input) -> Action {
+        let back = Screen::Page(Page::Bluetooth);
+        let Some(addr) = self.bt_target.clone() else { return self.go(back) };
+        let Some(dev) = self.bt.find(&addr).cloned() else { return self.go(back) };
+        match input {
+            Input::PageBack => self.go(back),
+            Input::Tap(x, y) => {
+                if self.layout.done_button().inset(-20).contains(x, y) {
+                    return self.go(back);
+                }
+                if self.layout.net_connect().inset(-12).contains(x, y) {
+                    let label = dev.label().to_string();
+                    return if !dev.paired {
+                        self.notice = Some(format!("Pairing with {label}…"));
+                        Action::PairBluetooth(addr)
+                    } else if dev.connected {
+                        self.notice = Some(format!("Disconnecting {label}…"));
+                        Action::DisconnectBluetooth(addr)
+                    } else {
+                        self.notice = Some(format!("Connecting to {label}…"));
+                        Action::ConnectBluetooth(addr)
+                    };
+                }
+                if dev.paired && self.layout.net_forget().inset(-12).contains(x, y) {
+                    self.notice = Some(format!("Forgetting {}…", dev.label()));
+                    return Action::ForgetBluetooth(addr);
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// The pairing confirmation: Pair (yes) or Cancel (no, and Back). The answer goes to the stack; the device
+    /// screen comes back for the result.
+    fn bluetooth_confirm(&mut self, input: Input) -> Action {
+        match input {
+            Input::PageBack => self.confirm_bluetooth(false),
+            Input::Tap(x, y) if self.layout.net_connect().inset(-12).contains(x, y) => self.confirm_bluetooth(true),
+            Input::Tap(x, y) if self.layout.net_forget().inset(-12).contains(x, y) => self.confirm_bluetooth(false),
+            _ => Action::None,
+        }
+    }
+
+    fn confirm_bluetooth(&mut self, yes: bool) -> Action {
+        self.bt_code.clear();
+        self.screen = Screen::BluetoothDevice;
+        self.notice = Some(if yes { "Confirming…".into() } else { "Pairing cancelled".into() });
+        Action::ConfirmBluetooth(yes)
     }
 
     /// Background mode: say it started; the driver runs it and shows its last line when it ends.
@@ -1704,8 +1841,17 @@ impl Ui {
     }
 
     fn go(&mut self, screen: Screen) -> Action {
+        let opening_bluetooth = screen == Screen::Page(Page::Bluetooth) && self.screen != screen;
         self.screen = screen;
         self.pressed = None;
+        if opening_bluetooth {
+            // The page lists what is nearby now: scan as it opens (when the radio is on).
+            self.bt_scroll = 0;
+            if self.bt.on {
+                self.bt_scanning = true;
+                return Action::ScanBluetooth;
+            }
+        }
         Action::Redraw { full: false }
     }
 
@@ -1789,6 +1935,8 @@ impl Ui {
             Screen::WallpaperPicker(target) => self.wallpaper_picker(input, target),
             Screen::WallpaperPreview => self.wallpaper_preview(input),
             Screen::NetworkDetail => self.network_detail(input),
+            Screen::BluetoothDevice => self.bluetooth_device(input),
+            Screen::BluetoothConfirm => self.bluetooth_confirm(input),
             Screen::Password => self.password_screen(input),
             Screen::NetworkName => self.network_name_screen(input),
             Screen::SshPassword => self.ssh_password_screen(input),
@@ -1861,6 +2009,9 @@ impl Ui {
                 if l.header_wifi().inset(-12).contains(x, y) {
                     return Action::Device(DeviceCmd::ToggleWifi);
                 }
+                if l.header_rect(crate::layout::HeaderIcon::Bluetooth, self.ssh_shown, self.bt.on, false).is_some_and(|r| r.inset(-12).contains(x, y)) {
+                    return self.toggle_bluetooth();
+                }
                 if l.header_battery().inset(-12).contains(x, y) {
                     self.settings_scroll = 0;
                     self.settings_parents.clear();
@@ -1875,6 +2026,7 @@ impl Ui {
                         QuickTile::Animation => Action::Device(DeviceCmd::ToggleAnimation),
                         QuickTile::ScreenTimeout => Action::Device(DeviceCmd::CycleScreenTimeout),
                         QuickTile::Ssh => Action::Device(DeviceCmd::ToggleSsh),
+                        QuickTile::Bluetooth => self.toggle_bluetooth(),
                         QuickTile::AllSettings => self.open_settings(),
                         QuickTile::Power => self.go(Screen::PowerMenu),
                     };
@@ -2250,6 +2402,44 @@ impl Ui {
                     None => Action::None,
                 }
             }
+            Input::Swipe { dy, dx, .. } if page == Page::Bluetooth && dy.abs() > SWIPE_MIN && dy.abs() > dx.abs() => {
+                let rows = ((dy.abs() / crate::layout::NETWORK_H as f32) as usize).max(1);
+                let next = if dy < 0.0 { self.bt_scroll + rows } else { self.bt_scroll.saturating_sub(rows) };
+                self.bt_scroll = next.min(self.bt_max_scroll());
+                Action::Redraw { full: false }
+            }
+            Input::Tap(x, y) if page == Page::Bluetooth && self.layout.bt_test_button().inset(-12).contains(x, y) => {
+                if !self.bt.on {
+                    return Action::None;
+                }
+                match self.bt.connected_name() {
+                    Some(name) => {
+                        self.notice = Some(format!("Playing a test sound through {name}…"));
+                        Action::TestBluetoothSound
+                    }
+                    None => {
+                        self.notice = Some("Connect headphones first, then tap Test sound.".into());
+                        Action::Redraw { full: false }
+                    }
+                }
+            }
+            Input::Tap(x, y) if page == Page::Bluetooth && self.layout.bt_area().scan.inset(-12).contains(x, y) => {
+                if !self.bt.on {
+                    return Action::None;
+                }
+                self.bt_scanning = true;
+                Action::ScanBluetooth
+            }
+            Input::Tap(x, y) if page == Page::Bluetooth && self.layout.bt_at(x, y).is_some() => {
+                let index = self.bt_scroll + self.layout.bt_at(x, y).unwrap_or(0);
+                match self.bt.devices.get(index).cloned() {
+                    Some(dev) => {
+                        self.bt_target = Some(dev.address);
+                        self.go(Screen::BluetoothDevice)
+                    }
+                    None => Action::None,
+                }
+            }
             Input::Tap(x, y) if page == Page::Wifi && self.layout.scan_at(x, y) => {
                 self.wifi_scanning = true;
                 Action::ScanWifi
@@ -2300,6 +2490,7 @@ impl Ui {
                 Some(Button::WarmDown) if self.display_support.warmth => Action::Device(DeviceCmd::Warmth(-1)),
                 Some(Button::WarmUp) if self.display_support.warmth => Action::Device(DeviceCmd::Warmth(1)),
                 Some(Button::Wifi) => Action::Device(DeviceCmd::ToggleWifi),
+                Some(Button::Bluetooth) => self.toggle_bluetooth(),
                 Some(Button::Rotation) => Action::Device(DeviceCmd::ToggleRotation),
                 Some(Button::Ssh) => Action::Device(DeviceCmd::ToggleSsh),
                 Some(Button::PublicDns) => Action::Device(DeviceCmd::ToggleDns),
@@ -3258,7 +3449,7 @@ mod tests {
     fn the_power_tile_opens_a_menu_with_restart_and_power_off() {
         let mut u = ui(1);
         u.screen = Screen::QuickSettings;
-        let (_, tile) = u.layout.quick_buttons()[7];
+        let (_, tile) = u.layout.quick_buttons()[8];
         assert_eq!(u.handle(centre(u.layout.quick_button_circle(tile))), Action::Redraw { full: false });
         assert_eq!(u.screen, Screen::PowerMenu, "the quick panel closes and the menu opens");
         let [(_, cancel), (_, kindle), (_, restart), (_, off)] = u.layout.power_buttons();
@@ -3288,7 +3479,7 @@ mod tests {
         let mut u = ui(1);
         u.handle(Input::Swipe { dx: 0.0, dy: 400.0, start_y: 40.0 });
         assert_eq!(u.screen, Screen::QuickSettings, "the status bar opens quick settings");
-        let all = u.layout.quick_button_circle(u.layout.quick_buttons()[6].1);
+        let all = u.layout.quick_button_circle(u.layout.quick_buttons()[7].1);
         u.handle(centre(all));
         assert_eq!(u.screen, Screen::Settings);
         // The Settings list opens the Display page, whose rows give the device commands.
@@ -3579,6 +3770,119 @@ mod tests {
         assert!(matches!(press(&mut u, Button::MenuLater), Action::SetOrder(_)));
         assert_eq!(u.page, 1);
         assert_eq!(u.menu_anchor(), u.layout.icon(0));
+    }
+
+    fn bt_device(name: &str, addr: &str, paired: bool, connected: bool) -> crate::bluetooth::Device {
+        crate::bluetooth::Device {
+            name: name.into(),
+            address: crate::bluetooth::BdAddr::parse(addr).unwrap(),
+            paired,
+            connected,
+            discovered: !paired,
+            rssi: Some(-50),
+            class: Some(0x0434),
+        }
+    }
+
+    const BT_A: &str = "AA:BB:CC:DD:EE:01";
+
+    #[test]
+    fn the_bluetooth_page_scans_as_it_opens_when_the_radio_is_on() {
+        use crate::bluetooth::{BdAddr, BtInfo};
+        let mut u = ui(1);
+        assert_eq!(u.go(Screen::Page(Page::Bluetooth)), Action::Redraw { full: false }, "off: nothing to scan");
+        u.screen = Screen::Home;
+        u.screen = Screen::Home;
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Headphones", BT_A, false, false)] });
+        assert_eq!(u.go(Screen::Page(Page::Bluetooth)), Action::ScanBluetooth);
+        assert!(u.bt_scanning);
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Headphones", BT_A, false, false)] });
+        assert!(!u.bt_scanning, "the list from the scan ends the scanning state");
+        // The nearby device opens its screen, and Pair asks the stack to pair it (its address, never shown).
+        assert_eq!(u.handle(centre(u.layout.bt_row(0))), Action::Redraw { full: false });
+        assert_eq!(u.screen, Screen::BluetoothDevice);
+        assert_eq!(u.handle(centre(u.layout.net_connect())), Action::PairBluetooth(BdAddr::parse(BT_A).unwrap()));
+    }
+
+    #[test]
+    fn a_paired_device_connects_disconnects_and_is_forgotten() {
+        use crate::bluetooth::{BdAddr, BtInfo};
+        let mut u = ui(1);
+        let addr = BdAddr::parse(BT_A).unwrap();
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Speaker", BT_A, true, false)] });
+        u.screen = Screen::Page(Page::Bluetooth);
+        u.handle(centre(u.layout.bt_row(0)));
+        assert_eq!(u.handle(centre(u.layout.net_connect())), Action::ConnectBluetooth(addr.clone()));
+        assert_eq!(u.handle(centre(u.layout.net_forget())), Action::ForgetBluetooth(addr.clone()));
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Speaker", BT_A, true, true)] });
+        assert_eq!(u.handle(centre(u.layout.net_connect())), Action::DisconnectBluetooth(addr));
+    }
+
+    #[test]
+    fn a_pairing_confirmation_is_answered_yes_or_no() {
+        use crate::bluetooth::{BdAddr, BtInfo};
+        let mut u = ui(1);
+        let addr = BdAddr::parse(BT_A).unwrap();
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Headphones", BT_A, false, false)] });
+        u.bt_target = Some(addr);
+        u.ask_bluetooth_confirmation("123456".into());
+        assert_eq!(u.screen, Screen::BluetoothConfirm);
+        assert_eq!(u.handle(centre(u.layout.net_connect())), Action::ConfirmBluetooth(true));
+        assert_eq!(u.screen, Screen::BluetoothDevice);
+        u.ask_bluetooth_confirmation(String::new());
+        assert_eq!(u.handle(Input::PageBack), Action::ConfirmBluetooth(false), "Back refuses the pairing");
+    }
+
+    #[test]
+    fn a_forgotten_device_leaves_its_screen() {
+        use crate::bluetooth::{BdAddr, BtInfo};
+        let mut u = ui(1);
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Speaker", BT_A, true, false)] });
+        u.bt_target = BdAddr::parse(BT_A);
+        u.screen = Screen::BluetoothDevice;
+        u.set_bluetooth(BtInfo { on: true, devices: vec![] });
+        assert_eq!(u.screen, Screen::Page(Page::Bluetooth));
+        assert!(u.bt_target.is_none());
+    }
+
+    #[test]
+    fn the_test_sound_plays_only_with_headphones_connected() {
+        use crate::bluetooth::BtInfo;
+        let mut u = ui(1);
+        u.screen = Screen::Page(Page::Bluetooth);
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Speaker", BT_A, true, false)] });
+        assert_eq!(u.handle(centre(u.layout.bt_test_button())), Action::Redraw { full: false }, "not connected: no sound");
+        assert!(u.notice.as_deref().unwrap_or("").contains("Connect headphones"));
+        u.set_bluetooth(BtInfo { on: true, devices: vec![bt_device("Headphones", BT_A, true, true)] });
+        assert_eq!(u.handle(centre(u.layout.bt_test_button())), Action::TestBluetoothSound);
+        assert!(u.notice.as_deref().unwrap_or("").contains("Headphones"));
+    }
+
+    #[test]
+    fn the_bluetooth_switch_the_tile_and_the_status_icon_toggle_the_radio() {
+        use crate::bluetooth::BtInfo;
+        let mut u = ui(1);
+        u.screen = Screen::Page(Page::Bluetooth);
+        let switch = u.layout.page_sections(Page::Bluetooth)[0].rows[0].buttons[0].1;
+        assert_eq!(u.handle(centre(switch)), Action::Device(DeviceCmd::ToggleBluetooth));
+        u.screen = Screen::QuickSettings;
+        let tile = u.layout.quick_buttons().into_iter().find(|(t, _)| *t == QuickTile::Bluetooth).unwrap().1;
+        assert_eq!(u.handle(centre(u.layout.quick_button_circle(tile))), Action::Device(DeviceCmd::ToggleBluetooth));
+        // The status icon only means something while the radio is on: with it off, no icon is drawn to tap.
+        use crate::layout::HeaderIcon;
+        let icon = |u: &Ui, ssh: bool| u.layout.header_rect(HeaderIcon::Bluetooth, ssh, u.bt.on, false).map(centre);
+        u.screen = Screen::QuickSettings;
+        assert_eq!(icon(&u, false), None, "off: no icon, nothing to tap");
+        u.set_bluetooth(BtInfo { on: true, devices: vec![] });
+        // Without SSH the icon is next to Wi-Fi; with SSH it moves one slot left, and the SSH slot is not Bluetooth.
+        u.screen = Screen::QuickSettings;
+        assert_eq!(u.handle(icon(&u, false).unwrap()), Action::Device(DeviceCmd::ToggleBluetooth));
+        u.ssh_shown = true;
+        u.screen = Screen::QuickSettings;
+        assert_eq!(u.handle(icon(&u, true).unwrap()), Action::Device(DeviceCmd::ToggleBluetooth));
+        u.screen = Screen::QuickSettings;
+        let ssh_slot = u.layout.header_rect(HeaderIcon::Ssh, true, true, false).map(centre).unwrap();
+        assert_ne!(u.handle(ssh_slot), Action::Device(DeviceCmd::ToggleBluetooth), "the SSH slot is not Bluetooth");
     }
 
     #[test]

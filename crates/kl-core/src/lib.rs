@@ -4,6 +4,7 @@
 
 pub mod apps;
 pub mod base64;
+pub mod bluetooth;
 pub mod battery;
 pub mod config;
 pub mod kual;

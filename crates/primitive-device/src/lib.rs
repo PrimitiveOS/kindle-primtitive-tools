@@ -15,6 +15,7 @@ use std::{
 use kl_core::{battery::{Reading, Source}, rotation::Debouncer};
 pub use kl_core::{Input, Rotation, Settings, Status, Usb};
 
+pub mod bluetooth;
 pub mod profile;
 
 pub fn log(msg: &str) {
@@ -402,6 +403,7 @@ pub fn status(settings: &Settings) -> Status {
     let storage = free_storage();
     let ip = wlan_ip();
     let ssh = ssh_running();
+    let bluetooth_on = bluetooth::is_on();
     // The connect command, shown while the server runs (the address is the Kindle's Wi-Fi address).
     let ssh_address = match (ssh, ip.as_str()) {
         (false, _) => String::new(),
@@ -446,6 +448,8 @@ pub fn status(settings: &Settings) -> Status {
         wifi_on,
         wifi_state,
         wifi_signal: lipc_text(WIFID, "signalStrength").and_then(|t| kl_core::wifi::parse_signal(&t)),
+        bluetooth_on,
+        bluetooth_connected: if bluetooth_on { bluetooth::connected_name() } else { None },
         light: light.unwrap_or(0),
         warmth: warmth.unwrap_or(0),
         display_support,

@@ -52,6 +52,7 @@ pub fn zoom_steps(from: Rect, to: Rect, n: usize) -> Vec<Rect> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Wifi,
+    Bluetooth,
     Connection,
     FileTransfer,
     Display,
@@ -101,15 +102,16 @@ pub struct Group {
 }
 
 impl Page {
-    pub const ALL: [Page; 16] = [
+    pub const ALL: [Page; 17] = [
         Page::Battery, Page::Display, Page::Wallpaper, Page::Accessibility, Page::Sleep, Page::Wifi,
-        Page::Connection, Page::FileTransfer, Page::Apps, Page::InstalledApps, Page::AppVisibility,
+        Page::Bluetooth, Page::Connection, Page::FileTransfer, Page::Apps, Page::InstalledApps, Page::AppVisibility,
         Page::Store, Page::Storage, Page::Device, Page::DateTime, Page::About,
     ];
 
     pub fn title(self) -> &'static str {
         match self {
             Page::Wifi => "Wi-Fi & network",
+            Page::Bluetooth => "Bluetooth",
             Page::Connection => "SSH & DNS",
             Page::FileTransfer => "Wi-Fi file transfer",
             Page::Display => "Display",
@@ -133,6 +135,11 @@ impl Page {
     pub fn groups(self) -> &'static [Group] {
         match self {
             Page::Wifi => &[Group { header: "Wi-Fi", rows: &[Row::Wifi], footer: "Turn Wi-Fi off in an airplane, or to save battery." }],
+            Page::Bluetooth => &[Group {
+                header: "Bluetooth",
+                rows: &[Row::Bluetooth],
+                footer: "Pair headphones or a speaker. Turn Bluetooth off to save battery. Keyboards are not supported yet.",
+            }],
             Page::Connection => &[
                 Group {
                     header: "SSH",
@@ -217,7 +224,7 @@ impl Page {
 /// The Settings list, grouped as on iPhone: connectivity, then the screen, then the battery, then the apps, then the
 /// device itself. Each group keeps its pages in the order they are used.
 const SETTINGS_GROUPS: &[(&str, &[Page])] = &[
-    ("Network", &[Page::Wifi, Page::Connection, Page::FileTransfer]),
+    ("Network", &[Page::Wifi, Page::Bluetooth, Page::Connection, Page::FileTransfer]),
     ("Display", &[Page::Display, Page::Wallpaper, Page::Accessibility, Page::Sleep]),
     ("Battery", &[Page::Battery]),
     ("Applications", &[Page::Apps, Page::Store]),
@@ -250,6 +257,7 @@ pub enum Button {
     WarmDown,
     WarmUp,
     Wifi,
+    Bluetooth,
     Rotation,
     RotationAuto,
     Ssh,
@@ -305,6 +313,8 @@ pub enum QuickTile {
     /// The screen timeout, cycled through the choices (its label shows the current one).
     ScreenTimeout,
     Ssh,
+    /// Bluetooth on or off (on shows the connected device's name under the tile).
+    Bluetooth,
     AllSettings,
     /// The power menu: Cancel, Restart, Power off (what a long press of the power button gives on the Kindle).
     Power,
@@ -323,6 +333,8 @@ pub enum Row {
     DarkMode,
     Wallpaper(WallpaperTarget),
     Wifi,
+    /// Bluetooth on or off (the page's switch). The page lists the devices below the switch.
+    Bluetooth,
     Rotation,
     Animation,
     /// The screen timeout: how long the screen stays on before the Kindle sleeps (quick settings cycle it too).
@@ -360,13 +372,14 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 39] = [
+    pub const ALL: [Row; 40] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
         Row::Wifi,
+        Row::Bluetooth,
         Row::Rotation,
         Row::Animation,
         Row::ScreenTimeout,
@@ -400,6 +413,7 @@ impl Row {
             Row::Animation => "Opening animation",
             Row::ScreenTimeout => "Sleep after",
             Row::Wifi => "Wi-Fi",
+            Row::Bluetooth => "Bluetooth",
             Row::Rotation => "Rotation",
             Row::Ssh => "SSH server (port 2222)",
             Row::SshPassword => "Password",
@@ -491,6 +505,8 @@ const QUICK_HANDLE_H: i32 = 72;
 const QUICK_SYSTEM_TOP: i32 = 56;
 const QUICK_STAT_H: i32 = 76;
 const QUICK_SIDE: i32 = 28;
+/// The distance between two status-bar icons (64 px icon and a 16 px gap).
+const HEADER_SLOT: i32 = 80;
 const QUICK_NUDGE: i32 = 72;
 /// The level rows' range: 25 steps, 0 to 24 (the Kindle's frontlight and warmth levels).
 pub const QUICK_LEVEL_MAX: u32 = 24;
@@ -549,6 +565,25 @@ fn level_step(bar: Rect, x: f32, y: f32) -> Option<u32> {
 /// The keyboard's Go key on the password screen.
 const KEYBOARD_GO: &str = "Join";
 
+/// The icons of the status bar and quick settings header (see `Layout::header_queue`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderIcon {
+    Wifi,
+    Ssh,
+    Bluetooth,
+    /// Headphones: shown while Bluetooth audio is connected.
+    Headphones,
+}
+
+/// The Bluetooth page's own area: the "Devices" header (its Scan button at the right), and the device list.
+pub struct BtArea {
+    pub header: i32,
+    pub scan: Rect,
+    pub list: Rect,
+    /// How many devices fit in the list.
+    pub visible: usize,
+}
+
 /// The Wi-Fi page's own area: the current network, and the scan list under its "Networks" header.
 pub struct WifiArea {
     pub current_header: i32,
@@ -594,6 +629,7 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::KindleUi => vec![(Button::KindleUi, r)],
         Row::Restart => vec![(Button::Restart, r)],
         Row::Wifi => vec![(Button::Wifi, r)],
+        Row::Bluetooth => vec![(Button::Bluetooth, r)],
         Row::DarkMode => vec![(Button::DarkMode, r)],
         Row::Animation => vec![(Button::Animation, r)],
         Row::ScreenTimeout => vec![(Button::ScreenTimeout, r)],
@@ -862,6 +898,37 @@ impl Layout {
         (0..visible).find(|&i| self.network_row(i).contains(x, y))
     }
 
+    /// The Bluetooth page's own area under its switch: the "Devices" header with the Scan button, then the list of
+    /// devices (connected first, then paired, then nearby audio). A notice line sits under the list.
+    pub fn bt_area(&self) -> BtArea {
+        let top = self.page_end(Page::Bluetooth);
+        let w = self.width - 2 * MARGIN;
+        let header = top;
+        let list_top = top + SECTION_HEAD_H;
+        let bottom = self.height - 110;
+        let list = Rect::new(MARGIN, list_top, w, (bottom - list_top).max(NETWORK_H));
+        let scan = Rect::new(self.width - MARGIN - 200, top - 4, 200, 52);
+        BtArea { header, scan, list, visible: (list.h / NETWORK_H).max(1) as usize }
+    }
+
+    /// The "Test sound" button of the Bluetooth page: left of Scan, on the same row.
+    pub fn bt_test_button(&self) -> Rect {
+        let scan = self.bt_area().scan;
+        Rect::new(scan.x - 20 - 260, scan.y, 260, scan.h)
+    }
+
+    /// Device row `i` of the visible part of the Bluetooth list.
+    pub fn bt_row(&self, i: usize) -> Rect {
+        let list = self.bt_area().list;
+        Rect::new(list.x, list.y + i as i32 * NETWORK_H, list.w, NETWORK_H)
+    }
+
+    /// The visible device row under a point (its index within the window), if any.
+    pub fn bt_at(&self, x: f32, y: f32) -> Option<usize> {
+        let visible = self.bt_area().visible;
+        (0..visible).find(|&i| self.bt_row(i).contains(x, y))
+    }
+
     /// Quick settings: a sheet from the top edge.
     pub fn quick_panel(&self) -> Rect {
         let h = QUICK_HEAD_H + QUICK_BUTTONS_H + 2 * QUICK_ROW_H + QUICK_SYSTEM_TOP + 3 * QUICK_STAT_H + 20 + QUICK_HANDLE_H;
@@ -883,6 +950,37 @@ impl Layout {
     pub fn header_wifi(&self) -> Rect {
         let b = self.header_battery();
         Rect::new(b.x - 26 - 64, (QUICK_HEAD_H - 64) / 2, 64, 64)
+    }
+
+    /// The status-bar icons that show, in order from the right edge: Wi-Fi always, then SSH while the server runs,
+    /// then Bluetooth while it is on, then the headphones while Bluetooth audio is connected. Each icon takes the next
+    /// slot to the left of the one before it, so a missing icon leaves no gap (without SSH, Bluetooth sits next to
+    /// Wi-Fi). The headphones come last, so they never move the other icons.
+    pub fn header_queue(ssh: bool, bluetooth: bool, headphones: bool) -> Vec<HeaderIcon> {
+        let mut queue = vec![HeaderIcon::Wifi];
+        if ssh {
+            queue.push(HeaderIcon::Ssh);
+        }
+        if bluetooth {
+            queue.push(HeaderIcon::Bluetooth);
+        }
+        if headphones {
+            queue.push(HeaderIcon::Headphones);
+        }
+        queue
+    }
+
+    /// Where one status-bar icon is drawn, given which icons show. `None` when the icon is not in the queue.
+    pub fn header_rect(&self, icon: HeaderIcon, ssh: bool, bluetooth: bool, headphones: bool) -> Option<Rect> {
+        let slot = Self::header_queue(ssh, bluetooth, headphones).iter().position(|i| *i == icon)? as i32;
+        let w = self.header_wifi();
+        Some(Rect::new(w.x - slot * HEADER_SLOT, w.y, 64, 64))
+    }
+
+    /// The left edge of the status-bar icons: the last icon of the queue.
+    pub fn header_left(&self, ssh: bool, bluetooth: bool, headphones: bool) -> i32 {
+        let last = Self::header_queue(ssh, bluetooth, headphones).len() as i32 - 1;
+        self.header_wifi().x - last * HEADER_SLOT
     }
 
     /// Level row `i` (0 brightness, 1 warmth), under the icon buttons.
@@ -925,10 +1023,10 @@ impl Layout {
         Rect::new(0, top + i as i32 * QUICK_STAT_H, self.width, QUICK_STAT_H)
     }
 
-    /// The six round icon buttons in one row, under the header: Airplane, Auto-rotate, Dark mode, Animation, SSH,
-    /// All settings. Each slot is a column of the row; the circle is `QUICK_BUTTON_D` wide, centred in it.
-    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 8] {
-        let slot = (self.width - 2 * QUICK_SIDE) / 8;
+    /// The nine round icon buttons in one row, under the header: Airplane, Auto-rotate, Dark mode, Animation, Sleep
+    /// timer, SSH, Bluetooth, All settings, Power. Each slot is a column of the row; the circle is `QUICK_BUTTON_D` wide, centred in it.
+    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 9] {
+        let slot = (self.width - 2 * QUICK_SIDE) / 9;
         let at = |i: i32| Rect::new(QUICK_SIDE + i * slot, QUICK_HEAD_H, slot, QUICK_BUTTONS_H);
         [
             (QuickTile::Airplane, at(0)),
@@ -937,8 +1035,9 @@ impl Layout {
             (QuickTile::Animation, at(3)),
             (QuickTile::ScreenTimeout, at(4)),
             (QuickTile::Ssh, at(5)),
-            (QuickTile::AllSettings, at(6)),
-            (QuickTile::Power, at(7)),
+            (QuickTile::Bluetooth, at(6)),
+            (QuickTile::AllSettings, at(7)),
+            (QuickTile::Power, at(8)),
         ]
     }
 
@@ -1384,6 +1483,22 @@ mod tests {
         assert!(l.quick_bar(1).bottom() <= l.quick_row(1).bottom());
         assert!(l.quick_plus(0).right() <= l.width - QUICK_SIDE);
         assert!(l.header_wifi().right() < l.header_battery().x);
+        let wifi = l.header_rect(HeaderIcon::Wifi, true, true, false).unwrap();
+        let ssh = l.header_rect(HeaderIcon::Ssh, true, true, false).unwrap();
+        let bt = l.header_rect(HeaderIcon::Bluetooth, true, true, false).unwrap();
+        assert_eq!(wifi, l.header_wifi(), "Wi-Fi is always the first icon from the right");
+        assert!(ssh.right() + 16 <= wifi.x, "SSH has its own gap left of Wi-Fi");
+        assert!(bt.right() + 16 <= ssh.x, "with SSH, Bluetooth is left of the SSH icon");
+        assert_eq!(l.header_rect(HeaderIcon::Bluetooth, false, true, false), Some(Rect::new(wifi.x - HEADER_SLOT, wifi.y, 64, 64)), "without SSH, Bluetooth takes the slot next to Wi-Fi");
+        assert_eq!(l.header_rect(HeaderIcon::Ssh, false, true, false), None, "SSH is not drawn while it is off");
+        assert!(bt.x >= 0, "the Bluetooth icon stays on the screen");
+        assert_eq!(l.header_left(false, false, false), wifi.x, "with no icon but Wi-Fi, the text stops at Wi-Fi");
+        // The headphones come after Bluetooth and never move the other icons.
+        let hp = l.header_rect(HeaderIcon::Headphones, false, true, true).unwrap();
+        assert_eq!(hp.x, wifi.x - 2 * HEADER_SLOT, "without SSH, the headphones take the slot after Bluetooth");
+        assert_eq!(l.header_rect(HeaderIcon::Bluetooth, false, true, true), l.header_rect(HeaderIcon::Bluetooth, false, true, false), "Bluetooth does not move");
+        assert_eq!(l.header_left(false, true, true), hp.x, "the text stops at the headphones");
+        assert_eq!(l.header_left(true, true, false), bt.x, "the text stops at the leftmost icon");
         assert!(l.quick_stat_row(2).bottom() <= l.quick_handle().y, "the system rows sit above the handle");
         assert!(l.quick_stat_row(0).y > l.quick_row(1).bottom());
     }
