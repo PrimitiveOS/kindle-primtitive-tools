@@ -58,6 +58,7 @@ pub enum Page {
     Wallpaper,
     Accessibility,
     Battery,
+    Usage,
     Sleep,
     Apps,
     InstalledApps,
@@ -116,6 +117,7 @@ impl Page {
             Page::Wallpaper => "Wallpaper",
             Page::Accessibility => "Accessibility",
             Page::Battery => "Battery",
+            Page::Usage => "Usage, last 7 days",
             Page::Sleep => "Sleep",
             Page::Apps => "Apps",
             Page::InstalledApps => "Installed apps",
@@ -170,9 +172,15 @@ impl Page {
                     footer: "You can also change this from Quick Settings.",
                 },
             ],
+            Page::Usage => &[
+                Group {
+                    header: "Last 7 days",
+                    rows: &[Row::UsageScreen, Row::UsageApp(0), Row::UsageApp(1), Row::UsageApp(2), Row::UsageApp(3)],
+                    footer: "Estimated from CPU time and time in front. Not a measurement of battery.",
+                },
+            ],
             Page::Battery => &[
-                Group { header: "Usage, last 7 days", rows: &[Row::UsageScreen, Row::UsageApp(0), Row::UsageApp(1), Row::UsageApp(2), Row::UsageApp(3)], footer: "Estimated from CPU time and time in front. Not a measurement of battery." },
-                Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
+                Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower, Row::UsageLink], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
                 Group { header: "Power settings", rows: &[Row::ScreenTimeout, Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
             ],
             Page::Sleep => &[Group {
@@ -316,6 +324,8 @@ pub enum Row {
     Warmth,
     DarkMode,
     WallpaperLink,
+    /// Opens the usage page: screen time and the most used apps, for the last seven days.
+    UsageLink,
     Wallpaper(WallpaperTarget),
     Wifi,
     Rotation,
@@ -359,11 +369,12 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 45] = [
+    pub const ALL: [Row; 46] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
         Row::WallpaperLink,
+        Row::UsageLink,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
         Row::Wifi,
@@ -402,6 +413,7 @@ impl Row {
             Row::Warmth => "Warmth",
             Row::DarkMode => "Dark mode",
             Row::WallpaperLink => "Wallpaper",
+            Row::UsageLink => "Usage, last 7 days",
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
             Row::ScreenTimeout => "Sleep after",
@@ -585,6 +597,7 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::Hidden => vec![(Button::ShowHidden, Rect::new(r.right() - SWITCH_INSET - 200, r.y + (r.h - SWITCH_H) / 2, 200, SWITCH_H))],
         Row::AppVisibility => vec![(Button::OpenPage(Page::AppVisibility), r)],
         Row::WallpaperLink => vec![(Button::OpenPage(Page::Wallpaper), r)],
+        Row::UsageLink => vec![(Button::OpenPage(Page::Usage), r)],
         Row::Wallpaper(target) => vec![(Button::OpenWallpaperPicker(target), r)],
         Row::ManageInstalled => vec![(Button::ManageInstalled, r)],
         Row::GridColumns => vec![(Button::GridColumns, r)],
@@ -1407,6 +1420,16 @@ mod tests {
         assert_eq!(l.pages(0), 1);
         assert_eq!(l.pages(20), 1);
         assert_eq!(l.pages(21), 2);
+    }
+
+    #[test]
+    fn the_battery_and_usage_pages_fit_without_scrolling() {
+        let l = oasis();
+        for page in [Page::Battery, Page::Usage] {
+            let sections = l.page_sections(page);
+            let last = sections.last().unwrap();
+            assert!(last.card.bottom() < l.height - 300, "{page:?}: the last section must be on screen (bottom {}, height {})", last.card.bottom(), l.height);
+        }
     }
 
     #[test]
