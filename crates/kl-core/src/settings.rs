@@ -57,6 +57,26 @@ pub struct Settings {
     pub device_model: Option<String>,
     /// The owner's name for this Kindle, typed on the Device name page (up to 32 characters).
     pub device_name: Option<String>,
+    /// Seconds the screen stays on before the Kindle sleeps (0 = never). One of `SCREEN_TIMEOUTS`.
+    pub screen_timeout: u32,
+}
+
+/// The screen timeouts the owner can choose, in seconds. 0 is never.
+pub const SCREEN_TIMEOUTS: [u32; 7] = [15, 30, 60, 120, 300, 600, 0];
+
+/// The next timeout in the cycle (quick settings and Settings both step through it).
+pub fn next_screen_timeout(current: u32) -> u32 {
+    let at = SCREEN_TIMEOUTS.iter().position(|&secs| secs == current).unwrap_or(SCREEN_TIMEOUTS.len() - 1);
+    SCREEN_TIMEOUTS[(at + 1) % SCREEN_TIMEOUTS.len()]
+}
+
+/// The timeout as the owner reads it: "15 s", "5 min", "Never".
+pub fn screen_timeout_label(secs: u32) -> String {
+    match secs {
+        0 => "Never".to_string(),
+        s if s < 60 => format!("{s} s"),
+        s => format!("{} min", s / 60),
+    }
 }
 
 impl Default for Settings {
@@ -73,6 +93,7 @@ impl Default for Settings {
             store_daily_check: true,
             device_model: None,
             device_name: None,
+            screen_timeout: 600,
         }
     }
 }
@@ -86,6 +107,7 @@ impl Settings {
             large_text: preferences.large_text,
             high_contrast: preferences.high_contrast,
             low_power: preferences.low_power,
+            screen_timeout: preferences.screen_timeout,
             ..base
         }
     }
@@ -117,6 +139,11 @@ impl Settings {
                 ("store_daily_check", "0") => s.store_daily_check = false,
                 ("device_model", value) if !value.is_empty() => s.device_model = Some(value.to_string()),
                 ("device_name", value) if !value.is_empty() => s.device_name = Some(value.to_string()),
+                ("screen_timeout", value) => {
+                    if let Some(secs) = value.parse().ok().filter(|secs| SCREEN_TIMEOUTS.contains(secs)) {
+                        s.screen_timeout = secs;
+                    }
+                }
                 _ => {}
             }
         }
@@ -152,6 +179,7 @@ impl Settings {
             u8::from(self.low_power),
         ) + &self.device_model.as_ref().map_or_else(String::new, |id| format!("device_model={id}\n"))
             + &self.device_name.as_ref().map_or_else(String::new, |name| format!("device_name={name}\n"))
+            + &format!("screen_timeout={}\n", self.screen_timeout)
     }
 }
 
@@ -173,6 +201,7 @@ mod tests {
             store_daily_check: false,
             device_model: None,
             device_name: None,
+            screen_timeout: 0,
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
         assert!(Settings::default().animation && !Settings::default().dark_mode);
@@ -228,5 +257,35 @@ mod tests {
         assert_eq!(Rotation::UpsideDown.turn(), 2);
         assert_eq!(Rotation::Upright.letter(), "U");
         assert_eq!(Rotation::Upright.flipped(), Rotation::UpsideDown);
+    }
+}
+
+#[cfg(test)]
+mod screen_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn the_timeout_cycles_through_the_choices_and_wraps_to_fifteen_seconds() {
+        assert_eq!(next_screen_timeout(15), 30);
+        assert_eq!(next_screen_timeout(600), 0, "ten minutes is followed by never");
+        assert_eq!(next_screen_timeout(0), 15, "never wraps to the shortest");
+        assert_eq!(next_screen_timeout(42), 15, "an unknown value starts the cycle again");
+    }
+
+    #[test]
+    fn the_labels_read_as_the_owner_sees_them() {
+        assert_eq!(screen_timeout_label(15), "15 s");
+        assert_eq!(screen_timeout_label(120), "2 min");
+        assert_eq!(screen_timeout_label(0), "Never");
+    }
+
+    #[test]
+    fn the_timeout_is_saved_in_the_preferences_and_read_back() {
+        let mut s = Settings::default();
+        assert_eq!(s.screen_timeout, 600, "the stock ten minutes by default");
+        s.screen_timeout = 300;
+        let back = Settings::parse(&s.preferences_text());
+        assert_eq!(back.screen_timeout, 300);
+        assert_eq!(Settings::parse("screen_timeout=7\n").screen_timeout, 600, "only the listed values are read");
     }
 }

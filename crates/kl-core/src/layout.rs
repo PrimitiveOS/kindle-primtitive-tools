@@ -177,7 +177,7 @@ impl Page {
             ],
             Page::Battery => &[
                 Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
-                Group { header: "Power settings", rows: &[Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
+                Group { header: "Power settings", rows: &[Row::ScreenTimeout, Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
             ],
             Page::Sleep => &[Group {
                 header: "Sleep screen",
@@ -284,6 +284,7 @@ pub enum Button {
     PowerOff,
     DarkMode,
     Animation,
+    ScreenTimeout,
     /// The Wi-Fi password screen: show or hide the password; join.
     PasswordShow,
     PasswordJoin,
@@ -299,6 +300,8 @@ pub enum QuickTile {
     AutoRotate,
     DarkMode,
     Animation,
+    /// The screen timeout, cycled through the choices (its label shows the current one).
+    ScreenTimeout,
     Ssh,
     AllSettings,
     /// The power menu: Cancel, Restart, Power off (what a long press of the power button gives on the Kindle).
@@ -321,6 +324,8 @@ pub enum Row {
     Wifi,
     Rotation,
     Animation,
+    /// The screen timeout: how long the screen stays on before the Kindle sleeps (quick settings cycle it too).
+    ScreenTimeout,
     Ssh,
     SshPassword,
     SshAddress,
@@ -354,7 +359,7 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 40] = [
+    pub const ALL: [Row; 41] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
@@ -365,6 +370,7 @@ impl Row {
         Row::Wifi,
         Row::Rotation,
         Row::Animation,
+        Row::ScreenTimeout,
         Row::Ssh,
         Row::SshPassword,
         Row::SshAddress,
@@ -394,6 +400,7 @@ impl Row {
             Row::WallpaperLink => "Wallpaper",
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
+            Row::ScreenTimeout => "Sleep after",
             Row::Wifi => "Wi-Fi",
             Row::Rotation => "Rotation",
             Row::Ssh => "SSH server (port 2222)",
@@ -592,6 +599,7 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::Wifi => vec![(Button::Wifi, r)],
         Row::DarkMode => vec![(Button::DarkMode, r)],
         Row::Animation => vec![(Button::Animation, r)],
+        Row::ScreenTimeout => vec![(Button::ScreenTimeout, r)],
         Row::Ssh => vec![(Button::Ssh, r)],
         Row::SshPassword => vec![(Button::SshPassword, r)],
         Row::SshAddress => vec![],
@@ -922,17 +930,18 @@ impl Layout {
 
     /// The six round icon buttons in one row, under the header: Airplane, Auto-rotate, Dark mode, Animation, SSH,
     /// All settings. Each slot is a column of the row; the circle is `QUICK_BUTTON_D` wide, centred in it.
-    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 7] {
-        let slot = (self.width - 2 * QUICK_SIDE) / 7;
+    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 8] {
+        let slot = (self.width - 2 * QUICK_SIDE) / 8;
         let at = |i: i32| Rect::new(QUICK_SIDE + i * slot, QUICK_HEAD_H, slot, QUICK_BUTTONS_H);
         [
             (QuickTile::Airplane, at(0)),
             (QuickTile::AutoRotate, at(1)),
             (QuickTile::DarkMode, at(2)),
             (QuickTile::Animation, at(3)),
-            (QuickTile::Ssh, at(4)),
-            (QuickTile::AllSettings, at(5)),
-            (QuickTile::Power, at(6)),
+            (QuickTile::ScreenTimeout, at(4)),
+            (QuickTile::Ssh, at(5)),
+            (QuickTile::AllSettings, at(6)),
+            (QuickTile::Power, at(7)),
         ]
     }
 

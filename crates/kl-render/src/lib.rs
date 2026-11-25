@@ -52,6 +52,8 @@ fn wifi_lit(s: &Status) -> Option<usize> {
 const POPUP_RADIUS: f32 = 28.0;
 /// The power symbol of the Power tile: a stroke from the top and an arc round the bottom (24-unit grid).
 const POWER_ICON: primitive_quick::Icon = primitive_quick::Icon { stroke: &["M12 3 V11", "M6.3 6.3 A8 8 0 1 0 17.7 6.3"], fill: &[] };
+/// A clock: a face and its two hands, drawn like the power icon.
+const TIMER_ICON: primitive_quick::Icon = primitive_quick::Icon { stroke: &["M12 3 A9 9 0 1 0 12.01 3", "M12 7 V12 L15 14"], fill: &[] };
 const POPUP_HALO: i32 = 10;
 
 // Icon paths copied from Primitive Browser (`crates/kb-app/src/ui.rs`, the `icon` set and `battery_icon`).
@@ -798,14 +800,15 @@ impl Renderer {
             if tile == QuickTile::AutoRotate && !s.display_support.auto_rotation {
                 continue;
             }
-            let (label, on) = match tile {
-                QuickTile::Airplane => ("Airplane", !s.wifi_on),
-                QuickTile::AutoRotate => ("Auto-rotate", s.auto_rotation),
-                QuickTile::DarkMode => ("Dark mode", s.dark_mode),
-                QuickTile::Animation => ("Animation", s.animation),
-                QuickTile::Ssh => ("SSH", s.ssh),
-                QuickTile::AllSettings => ("Settings", false),
-                QuickTile::Power => ("Power", false),
+            let (label, on): (String, bool) = match tile {
+                QuickTile::Airplane => ("Airplane".into(), !s.wifi_on),
+                QuickTile::AutoRotate => ("Auto-rotate".into(), s.auto_rotation),
+                QuickTile::DarkMode => ("Dark mode".into(), s.dark_mode),
+                QuickTile::Animation => ("Animation".into(), s.animation),
+                QuickTile::Ssh => ("SSH".into(), s.ssh),
+                QuickTile::AllSettings => ("Settings".into(), false),
+                QuickTile::ScreenTimeout => (kl_core::settings::screen_timeout_label(s.screen_timeout), s.screen_timeout == 0),
+                QuickTile::Power => ("Power".into(), false),
             };
             let (bg, fg) = if on { (BLACK, WHITE) } else { (WHITE, BLACK) };
             let c = l.quick_button_circle(slot);
@@ -819,13 +822,14 @@ impl Renderer {
                 QuickTile::AutoRotate => primitive_quick::icons::ROTATE,
                 QuickTile::DarkMode => primitive_quick::icons::MOON,
                 QuickTile::Animation => primitive_quick::icons::ANIMATION,
+                QuickTile::ScreenTimeout => TIMER_ICON,
                 QuickTile::Ssh => primitive_quick::icons::SSH,
                 QuickTile::AllSettings => primitive_quick::icons::SETTINGS,
                 QuickTile::Power => POWER_ICON,
             };
             let _ = (cx, cy, bg);
             self.draw_icon(icon, ix, iy, size, fg);
-            self.text(Text { text: label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
+            self.text(Text { text: &label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
         }
         for row in 0..2 {
             let (icon, label, value, available) = if row == 0 {
@@ -2417,6 +2421,7 @@ fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
         Row::WallpaperLink => "Home, sleep, and startup pictures".into(),
         Row::Wallpaper(target) => ui.wallpapers.selection(target).label(target).into(),
         Row::Animation => if s.animation { "On: a zoom when an app opens".into() } else { "Off".into() },
+        Row::ScreenTimeout => kl_core::settings::screen_timeout_label(s.screen_timeout),
         Row::Rotation => match (s.auto_rotation, s.rotation) {
             (true, Rotation::Upright) => "Automatic: upright".into(),
             (true, Rotation::UpsideDown) => "Automatic: upside down".into(),
