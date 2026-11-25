@@ -113,6 +113,16 @@ pub fn connected_name() -> Option<String> {
     CONNECTED.lock().ok().and_then(|g| g.clone())
 }
 
+/// Read the connected device now and keep its name for the status bar. Two calls to the stack (the radio, then the
+/// connected list), so the launcher runs it on a background thread, every few seconds. Without it, the status bar
+/// keeps a device that has left (put in its case, switched off) until the Bluetooth page is opened.
+pub fn refresh_connection() {
+    let name = if is_on() { bluetooth::connected_name_in(&list("ListConnected")) } else { None };
+    if let Ok(mut g) = CONNECTED.lock() {
+        *g = name;
+    }
+}
+
 fn remember(info: &BtInfo) {
     if let Ok(mut g) = CONNECTED.lock() {
         *g = info.connected_name();
