@@ -19,6 +19,7 @@ pub mod ui;
 pub mod wallpaper;
 pub mod wifi;
 pub mod models;
+pub mod usage;
 pub mod page_chord;
 
 pub use apps::{discover, App, IconSource, Launch};
