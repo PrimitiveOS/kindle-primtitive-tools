@@ -258,6 +258,35 @@ impl Renderer {
         }
     }
 
+    /// The usage card below the 24-hour chart: the last seven days, one line per item (screen on, then the most used apps).
+    pub(super) fn battery_usage(&mut self, layout: Layout, status: &Status) {
+        let page_end = layout.page_end(Page::Battery);
+        let chart_h = (layout.height - page_end - 156).min(390);
+        let y = page_end + 52 + chart_h + 40;
+        let lines = status.usage.len().max(1) as i32;
+        let height = 120 + lines * 60;
+        if y + height > layout.height - 40 {
+            return;
+        }
+        self.section_header(MARGIN_X, y, "Usage, last 7 days");
+        let card = Rect::new(MARGIN_X, y + 52, layout.width - 2 * MARGIN_X, height);
+        self.card(card);
+        let inset = card.inset(28);
+        if status.usage.is_empty() {
+            self.history_text(inset, "No use yet", 34.0, BLACK);
+        }
+        for (i, (label, value)) in status.usage.iter().enumerate() {
+            let row = Rect::new(inset.x, inset.y + i as i32 * 60, inset.w, 44);
+            self.history_text(row, &format!("{label} · {value}"), 30.0, BLACK);
+        }
+        self.history_text(
+            Rect::new(inset.x, card.bottom() - 62, inset.w, 36),
+            "Estimated from CPU time and time in front. Not a measurement of battery.",
+            24.0,
+            85,
+        );
+    }
+
     pub(super) fn battery_history(&mut self, layout: Layout, status: &Status) {
         let y = layout.page_end(Page::Battery);
         let card = Rect::new(
@@ -306,15 +335,24 @@ impl Renderer {
         };
         for (i, item) in entries.iter().enumerate() {
             let end = point(item);
-            if i > 0 && !item.gap_before {
+            if i > 0 {
                 let previous = entries[i - 1];
                 let begin = point(previous);
-                self.ctx.set_transform(Affine::IDENTITY);
-                self.ctx.set_stroke(kurbo::Stroke::new(4.0));
-                self.ctx.set_paint(super::gray(BLACK));
-                self.ctx
-                    .stroke_path(&kurbo::Line::new(begin, end).to_path(0.1));
-                if previous.source == Source::Charging {
+                // A short gap (the Kindle asleep) is a dotted line; a long one has no reading and breaks the line.
+                let short_gap = item.observed_at - previous.observed_at <= ASLEEP_GAP_SECS;
+                if !item.gap_before || short_gap {
+                    let stroke = if item.gap_before {
+                        kurbo::Stroke::new(3.0).with_dashes(0.0, [6.0, 8.0])
+                    } else {
+                        kurbo::Stroke::new(4.0)
+                    };
+                    self.ctx.set_transform(Affine::IDENTITY);
+                    self.ctx.set_stroke(stroke);
+                    self.ctx.set_paint(super::gray(BLACK));
+                    self.ctx
+                        .stroke_path(&kurbo::Line::new(begin, end).to_path(0.1));
+                }
+                if !item.gap_before && previous.source == Source::Charging {
                     self.fill(
                         Rect::new(
                             begin.x as i32,
@@ -378,6 +416,9 @@ impl Renderer {
         });
     }
 }
+
+/// A gap up to this long (the Kindle asleep, between two readings) is drawn dotted on the chart.
+const ASLEEP_GAP_SECS: u64 = 2 * 60 * 60;
 
 pub(super) fn battery_status(status: &Status) -> String {
     let level = status

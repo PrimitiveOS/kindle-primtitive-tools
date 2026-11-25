@@ -287,6 +287,30 @@ pub fn touch_loop_with_origin(path: String, mut report: impl FnMut(Input, f32)) 
 }
 
 /// Page buttons: presses only. Upside down, forward and back trade places.
+/// Like `button_loop`, and also reports every press (`down` true) and release (`down` false) of each key, so a launcher
+/// can time a hold of two keys. Autorepeat (value 2) is not reported.
+pub fn button_loop_keys(path: String, mut report: impl FnMut(Input), mut key: impl FnMut(u16, bool)) {
+    let mut file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) => return log(&format!("cannot open {path}: {e}")),
+    };
+    log(&format!("buttons {path}"));
+    loop {
+        let Some(ev) = read_event(&mut file) else {
+            return log("button read failed");
+        };
+        if ev.kind != EV_KEY || ev.value == 2 {
+            continue;
+        }
+        key(ev.code, ev.value == 1);
+        if ev.value == 1 {
+            if let Some(input) = page_button(ev.code, TURN.load(Ordering::Relaxed)) {
+                report(input);
+            }
+        }
+    }
+}
+
 pub fn button_loop(path: String, mut report: impl FnMut(Input)) {
     let mut file = match File::open(&path) {
         Ok(f) => f,

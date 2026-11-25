@@ -20,6 +20,8 @@ pub enum Screen {
     Settings,
     /// "Open the Kindle UI?" over the previous screen.
     ConfirmKindle,
+    /// Restart the launcher after a double press of the power key (the open app is closed).
+    ConfirmRestart,
     /// The power menu: Cancel, Restart, Power off (opened by the Power tile in quick settings).
     PowerMenu,
     Sleep,
@@ -74,6 +76,8 @@ pub enum Input {
     Sleep,
     /// `powerd` left the screensaver.
     Wake,
+    /// Both page-turn buttons were held for two seconds: confirm, then restart the launcher.
+    RestartHold,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,8 @@ pub enum DeviceCmd {
     PowerOff,
     /// Settings > Device > Launcher: start the launcher again (the supervisor starts it, as after an install).
     RestartLauncher,
+    /// Close the open app, then restart the launcher.
+    QuitAppAndRestart,
     /// Primitive Store: install the entry at this index of `Ui::store` (its position in the list).
     StoreInstall(usize),
     /// Primitive Store: download the catalog again (the Refresh button).
@@ -111,6 +117,8 @@ pub enum DeviceCmd {
     RemoveInstalledApp(usize),
     ToggleDarkMode,
     ToggleAnimation,
+    /// Step the screen timeout to the next choice (15 s, 30 s … never).
+    CycleScreenTimeout,
     ToggleLargeText,
     ToggleHighContrast,
     SyncClock,
@@ -238,6 +246,10 @@ pub struct Status {
     pub dark_mode: bool,
     /// The opening zoom is on.
     pub animation: bool,
+    /// Seconds the screen stays on before the Kindle sleeps (0 = never).
+    pub screen_timeout: u32,
+    /// The battery usage summary lines: index 0 is the screen line, 1 to 4 the most used apps (name, value).
+    pub usage: Vec<(String, String)>,
     pub rotation: Rotation,
     /// Free memory for the About text, e.g. "MemAvailable 312 MB".
     pub memory: String,
@@ -1741,6 +1753,10 @@ impl Ui {
             return Action::None;
         }
         match input {
+            Input::RestartHold => {
+                self.go(Screen::ConfirmRestart);
+                return Action::Redraw { full: true };
+            }
             Input::Sleep => {
                 if self.screen != Screen::Sleep {
                     self.before_sleep = self.screen;
@@ -1778,6 +1794,7 @@ impl Ui {
             Screen::SshPassword => self.ssh_password_screen(input),
             Screen::DeviceName => self.device_name_screen(input),
             Screen::ConfirmKindle => self.confirm(input),
+            Screen::ConfirmRestart => self.confirm_restart(input),
             Screen::PowerMenu => self.power_menu(input),
             Screen::AppMenu => self.app_menu(input),
             Screen::Extensions => self.extensions_list(input),
@@ -1856,6 +1873,7 @@ impl Ui {
                         QuickTile::AutoRotate => Action::None,
                         QuickTile::DarkMode => Action::Device(DeviceCmd::ToggleDarkMode),
                         QuickTile::Animation => Action::Device(DeviceCmd::ToggleAnimation),
+                        QuickTile::ScreenTimeout => Action::Device(DeviceCmd::CycleScreenTimeout),
                         QuickTile::Ssh => Action::Device(DeviceCmd::ToggleSsh),
                         QuickTile::AllSettings => self.open_settings(),
                         QuickTile::Power => self.go(Screen::PowerMenu),
@@ -2314,6 +2332,7 @@ impl Ui {
                 Some(Button::RotationAuto) if self.display_support.auto_rotation => Action::Device(DeviceCmd::ToggleAutoRotation),
                 Some(Button::DarkMode) => Action::Device(DeviceCmd::ToggleDarkMode),
                 Some(Button::Animation) => Action::Device(DeviceCmd::ToggleAnimation),
+                Some(Button::ScreenTimeout) => Action::Device(DeviceCmd::CycleScreenTimeout),
                 Some(Button::LargeText) => Action::Device(DeviceCmd::ToggleLargeText),
                 Some(Button::HighContrast) => Action::Device(DeviceCmd::ToggleHighContrast),
                 Some(Button::KindleUi) => self.go(Screen::ConfirmKindle),
@@ -2336,6 +2355,18 @@ impl Ui {
         } else if restart.inset(-12).contains(x, y) {
             Action::Device(DeviceCmd::Restart)
         } else if cancel.inset(-12).contains(x, y) || !self.layout.power_box().contains(x, y) {
+            self.go(Screen::Home)
+        } else {
+            Action::None
+        }
+    }
+
+    fn confirm_restart(&mut self, input: Input) -> Action {
+        let Input::Tap(x, y) = input else { return Action::None };
+        let [(_, cancel), (_, restart)] = self.layout.confirm_buttons();
+        if restart.inset(-12).contains(x, y) {
+            Action::Device(DeviceCmd::QuitAppAndRestart)
+        } else if cancel.inset(-12).contains(x, y) || !self.layout.confirm_box().contains(x, y) {
             self.go(Screen::Home)
         } else {
             Action::None
@@ -2412,10 +2443,8 @@ mod tests {
         u.open_settings();
         let row = |u: &Ui, page, label| u.layout.page_sections(page).into_iter()
             .flat_map(|section| section.rows).find(|item| item.row == label).unwrap().rect;
-        let battery = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Battery).unwrap().1;
-        u.handle(centre(battery));
-        u.handle(centre(row(&u, Page::Battery, Row::BatteryDisplay)));
-        u.handle(centre(row(&u, Page::Display, Row::WallpaperLink)));
+        let wallpaper = u.layout.settings_home_rows(0).into_iter().find(|(page, _)| *page == Page::Wallpaper).unwrap().1;
+        u.handle(centre(wallpaper));
         assert_eq!(u.screen, Screen::Page(Page::Wallpaper));
         let target = WallpaperTarget::Sleep;
         u.handle(centre(row(&u, Page::Wallpaper, Row::Wallpaper(target))));
@@ -2444,8 +2473,7 @@ mod tests {
         assert_eq!(u.wallpaper_scroll, 0);
         assert_eq!(u.handle(centre(u.layout.wallpaper_preview().apply)), Action::None);
         u.handle(Input::PageBack);
-        for expected in [Screen::Page(Page::Wallpaper), Screen::Page(Page::Display),
-            Screen::Page(Page::Battery), Screen::Settings]
+        for expected in [Screen::Page(Page::Wallpaper), Screen::Settings]
         {
             u.handle(centre(u.layout.done_button()));
             assert_eq!(u.screen, expected);
@@ -2542,10 +2570,6 @@ mod tests {
         assert_eq!(u.screen, Screen::Page(Page::Battery));
         let power = setting_row(&u, Page::Battery, Row::LowPower);
         assert_eq!(u.handle(centre(power)), Action::Device(DeviceCmd::ToggleLowPower));
-        u.handle(centre(setting_row(&u, Page::Battery, Row::BatteryDisplay)));
-        assert_eq!(u.screen, Screen::Page(Page::Display));
-        u.handle(Input::PageBack);
-        assert_eq!(u.screen, Screen::Page(Page::Battery));
 
         u.handle(Input::PageBack);
         u.handle(swipe(-900.0));
@@ -3058,6 +3082,25 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_timeout_tile_and_the_battery_row_both_cycle_the_setting() {
+        let mut u = ui(0);
+        u.screen = Screen::QuickSettings;
+        let (tile_kind, tile) = u.layout.quick_buttons()[4];
+        assert_eq!(tile_kind, QuickTile::ScreenTimeout);
+        assert_eq!(u.handle(centre(u.layout.quick_button_circle(tile))), Action::Device(DeviceCmd::CycleScreenTimeout));
+        u.screen = Screen::Page(Page::Sleep);
+        let row = u.layout.page_sections(Page::Sleep).into_iter().flat_map(|s| s.rows).find(|r| r.row == crate::layout::Row::ScreenTimeout).unwrap();
+        assert_eq!(u.handle(centre(row.rect)), Action::Device(DeviceCmd::CycleScreenTimeout));
+    }
+
+    #[test]
+    fn holding_both_page_buttons_asks_before_restarting_the_launcher() {
+        let mut u = ui(0);
+        assert_eq!(u.handle(Input::RestartHold), Action::Redraw { full: true });
+        assert_eq!(u.screen, Screen::ConfirmRestart);
+    }
+
+    #[test]
     fn the_product_page_scrolls_and_its_action_installs_or_shows_the_link() {
         use crate::store::{test_entry, Kind, Status};
         let mut u = ui(0);
@@ -3215,7 +3258,7 @@ mod tests {
     fn the_power_tile_opens_a_menu_with_restart_and_power_off() {
         let mut u = ui(1);
         u.screen = Screen::QuickSettings;
-        let (_, tile) = u.layout.quick_buttons()[6];
+        let (_, tile) = u.layout.quick_buttons()[7];
         assert_eq!(u.handle(centre(u.layout.quick_button_circle(tile))), Action::Redraw { full: false });
         assert_eq!(u.screen, Screen::PowerMenu, "the quick panel closes and the menu opens");
         let [(_, cancel), (_, kindle), (_, restart), (_, off)] = u.layout.power_buttons();
@@ -3245,7 +3288,7 @@ mod tests {
         let mut u = ui(1);
         u.handle(Input::Swipe { dx: 0.0, dy: 400.0, start_y: 40.0 });
         assert_eq!(u.screen, Screen::QuickSettings, "the status bar opens quick settings");
-        let all = u.layout.quick_button_circle(u.layout.quick_buttons()[5].1);
+        let all = u.layout.quick_button_circle(u.layout.quick_buttons()[6].1);
         u.handle(centre(all));
         assert_eq!(u.screen, Screen::Settings);
         // The Settings list opens the Display page, whose rows give the device commands.

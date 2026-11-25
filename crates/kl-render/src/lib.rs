@@ -57,6 +57,8 @@ fn wifi_lit(s: &Status) -> Option<usize> {
 const POPUP_RADIUS: f32 = 28.0;
 /// The power symbol of the Power tile: a stroke from the top and an arc round the bottom (24-unit grid).
 const POWER_ICON: primitive_quick::Icon = primitive_quick::Icon { stroke: &["M12 3 V11", "M6.3 6.3 A8 8 0 1 0 17.7 6.3"], fill: &[] };
+/// A clock: a face and its two hands, drawn like the power icon.
+const TIMER_ICON: primitive_quick::Icon = primitive_quick::Icon { stroke: &["M12 3 A9 9 0 1 0 12.01 3", "M12 7 V12 L15 14"], fill: &[] };
 const POPUP_HALO: i32 = 10;
 
 // Icon paths copied from Primitive Browser (`crates/kb-app/src/ui.rs`, the `icon` set and `battery_icon`).
@@ -676,6 +678,7 @@ impl Renderer {
             Screen::DeviceName => self.device_name_screen(ui),
             // The dialog is a pop-up over the grid, drawn last (below).
             Screen::ConfirmKindle => self.home(ui, status, &mut icon_blits),
+            Screen::ConfirmRestart => self.home(ui, status, &mut icon_blits),
             Screen::PowerMenu => self.home(ui, status, &mut icon_blits),
             // A sleep picture replaces the text, except for a battery warning, which matters more.
             Screen::Sleep => {
@@ -695,7 +698,7 @@ impl Renderer {
         let mut out = self.finish_gray();
         let wallpaper = if let Some(draft) = home_preview {
             self.wallpaper_preview.as_ref().filter(|_| draft.has_opacity()).map(|picture| (picture, draft.opacity))
-        } else if matches!(screen, Screen::Home | Screen::ConfirmKindle | Screen::PowerMenu | Screen::AppMenu | Screen::QuickSettings) {
+        } else if matches!(screen, Screen::Home | Screen::ConfirmKindle | Screen::ConfirmRestart | Screen::PowerMenu | Screen::AppMenu | Screen::QuickSettings) {
             self.home_wallpaper.as_ref().map(|picture| (picture, ui.wallpapers.opacity(WallpaperTarget::Home)))
         } else {
             None
@@ -737,6 +740,7 @@ impl Renderer {
         // Pop-ups are drawn in a second pass and copied over the screen, so icon pictures stay under them.
         let popup = match ui.screen {
             Screen::ConfirmKindle => Some(l.confirm_box()),
+            Screen::ConfirmRestart => Some(l.confirm_box()),
             Screen::PowerMenu => Some(l.power_box()),
             Screen::AppMenu => Some(l.menu_box(ui.menu_anchor(), ui.menu_actions().len())),
             Screen::QuickSettings => Some(l.quick_panel()),
@@ -755,6 +759,7 @@ impl Renderer {
             self.fill(l.screen(), WHITE);
             match ui.screen {
                 Screen::ConfirmKindle => self.confirm(&l),
+                Screen::ConfirmRestart => self.confirm_restart(&l),
                 Screen::PowerMenu => self.power_menu_box(&l),
                 Screen::QuickSettings => self.quick_panel(&l, status),
                 Screen::StoreApp if ui.store_sheet.is_some() => self.store_install_sheet(ui),
@@ -775,7 +780,7 @@ impl Renderer {
         }
         // Over an app, the system's pop-ups float over the app's screen: every pixel outside the pop-up is the app's.
         if let (Some(backdrop), Some(b)) = (self.backdrop.as_ref(), popup) {
-            if matches!(ui.screen, Screen::QuickSettings | Screen::PowerMenu | Screen::ConfirmKindle | Screen::AppMenu)
+            if matches!(ui.screen, Screen::QuickSettings | Screen::PowerMenu | Screen::ConfirmKindle | Screen::ConfirmRestart | Screen::AppMenu)
                 && backdrop.len() == out.len()
             {
                 image::keep_area(&mut out, backdrop, width, (b.x - halo, b.y - halo, b.w + 2 * halo, b.h + 2 * halo));
@@ -896,14 +901,15 @@ impl Renderer {
             if tile == QuickTile::AutoRotate && !s.display_support.auto_rotation {
                 continue;
             }
-            let (label, on) = match tile {
-                QuickTile::Airplane => ("Airplane", !s.wifi_on),
-                QuickTile::AutoRotate => ("Auto-rotate", s.auto_rotation),
-                QuickTile::DarkMode => ("Dark mode", s.dark_mode),
-                QuickTile::Animation => ("Animation", s.animation),
-                QuickTile::Ssh => ("SSH", s.ssh),
-                QuickTile::AllSettings => ("Settings", false),
-                QuickTile::Power => ("Power", false),
+            let (label, on): (String, bool) = match tile {
+                QuickTile::Airplane => ("Airplane".into(), !s.wifi_on),
+                QuickTile::AutoRotate => ("Auto-rotate".into(), s.auto_rotation),
+                QuickTile::DarkMode => ("Dark mode".into(), s.dark_mode),
+                QuickTile::Animation => ("Animation".into(), s.animation),
+                QuickTile::Ssh => ("SSH".into(), s.ssh),
+                QuickTile::AllSettings => ("Settings".into(), false),
+                QuickTile::ScreenTimeout => (kl_core::settings::screen_timeout_label(s.screen_timeout), s.screen_timeout == 0),
+                QuickTile::Power => ("Power".into(), false),
             };
             let (bg, fg) = if on { (BLACK, WHITE) } else { (WHITE, BLACK) };
             let c = l.quick_button_circle(slot);
@@ -917,13 +923,14 @@ impl Renderer {
                 QuickTile::AutoRotate => primitive_quick::icons::ROTATE,
                 QuickTile::DarkMode => primitive_quick::icons::MOON,
                 QuickTile::Animation => primitive_quick::icons::ANIMATION,
+                QuickTile::ScreenTimeout => TIMER_ICON,
                 QuickTile::Ssh => primitive_quick::icons::SSH,
                 QuickTile::AllSettings => primitive_quick::icons::SETTINGS,
                 QuickTile::Power => POWER_ICON,
             };
             let _ = (cx, cy, bg);
             self.draw_icon(icon, ix, iy, size, fg);
-            self.text(Text { text: label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
+            self.text(Text { text: &label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
         }
         for row in 0..2 {
             let (icon, label, value, available) = if row == 0 {
@@ -2124,6 +2131,7 @@ impl Renderer {
         }
         if page == kl_core::layout::Page::Battery {
             self.battery_history(l, s);
+            self.battery_usage(l, s);
         }
         // A result of an action on this page (a Wi-Fi join, an SSH check or password): shown at the bottom on every page.
         if let Some(notice) = ui.notice.clone() {
@@ -2392,6 +2400,27 @@ impl Renderer {
         self.button(open, "Open Kindle UI", true);
     }
 
+    fn confirm_restart(&mut self, l: &Layout) {
+        let b = l.confirm_box();
+        self.rounded_frame(b, POPUP_RADIUS as f64, 6, BLACK, WHITE);
+        let inner = b.inset(48);
+        self.text(Text { text: "Restart the launcher?", x: inner.x as f32, y: inner.y as f32, w: inner.w as f32, size: 50.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        self.text(Text {
+            text: "The app you have open closes, and the launcher starts again. Unsaved work in that app is lost.",
+            x: inner.x as f32,
+            y: inner.y as f32 + 100.0,
+            w: inner.w as f32,
+            size: 36.0,
+            bold: false,
+            align: Align::Start,
+            lines: 4,
+            gray: BLACK,
+        });
+        let [(_, cancel), (_, restart)] = l.confirm_buttons();
+        self.button(cancel, "Cancel", false);
+        self.button(restart, "Restart", true);
+    }
+
     /// A full-screen message (e.g. "Starting the Kindle UI"): a title and a body, centred.
     pub fn message(&mut self, title: &str, body: &str) -> Vec<u8> {
         self.ctx.reset();
@@ -2491,9 +2520,9 @@ fn row_value(row: Row, ui: &Ui, s: &Status) -> String {
         Row::TextPreview => "Read at your own pace.".into(),
         Row::Wifi => wifi_word(s),
         Row::DarkMode => if s.dark_mode { "On: white on black".into() } else { "Off".into() },
-        Row::WallpaperLink => "Home, sleep, and startup pictures".into(),
         Row::Wallpaper(target) => ui.wallpapers.selection(target).label(target).into(),
         Row::Animation => if s.animation { "On: a zoom when an app opens".into() } else { "Off".into() },
+        Row::ScreenTimeout => kl_core::settings::screen_timeout_label(s.screen_timeout),
         Row::Rotation => match (s.auto_rotation, s.rotation) {
             (true, Rotation::Upright) => "Automatic: upright".into(),
             (true, Rotation::UpsideDown) => "Automatic: upside down".into(),

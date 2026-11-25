@@ -23,6 +23,10 @@ pub enum Ev {
     Background { name: String, line: String, ok: bool },
     /// A Wi-Fi scan finished.
     Wifi(kl_core::wifi::WifiInfo),
+    /// A page-turn key was pressed (`down`) or released: the launcher times a hold of both (restart).
+    PageKey { code: u16, down: bool },
+    /// The two-button hold may be complete: check it.
+    ChordTick,
     /// A Wi-Fi join or forget finished: whether it worked, and what to tell the user.
     WifiResult { ok: bool, message: String },
     /// A background SSH job finished (set the password, check the server): what to tell the user.

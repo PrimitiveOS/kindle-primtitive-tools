@@ -57,6 +57,14 @@ fn set_int(service: &str, prop: &str, value: u32) -> bool {
     ok
 }
 
+/// Stock value for "never": a day. The launcher keeps the idle timer refreshed while the owner chose never.
+const NEVER_SECS: u32 = 86_400;
+
+/// Set how long the screen stays on before the Kindle sleeps: `secs` seconds, or a day for never.
+pub fn set_screen_timeout(secs: u32) -> bool {
+    set_int(POWERD, "screenSaverTimeout", if secs == 0 { NEVER_SECS } else { secs })
+}
+
 /// Refresh the active idle timer. Leave the persistent screensaver setting alone.
 pub fn refresh_screen_timeout() -> bool {
     if may_refresh_screen_timeout(
@@ -431,6 +439,8 @@ pub fn status(settings: &Settings) -> Status {
         auto_rotation: settings.auto_rotation && display_support.auto_rotation,
         dark_mode: settings.dark_mode,
         animation: settings.animation,
+        screen_timeout: settings.screen_timeout,
+        usage: Vec::new(),
         large_text: settings.large_text,
         high_contrast: settings.high_contrast,
         wifi_on,

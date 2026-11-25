@@ -147,7 +147,7 @@ impl Page {
             ],
             Page::Display => &[
                 Group { header: "Brightness", rows: &[Row::Frontlight, Row::Warmth], footer: "" },
-                Group { header: "Appearance", rows: &[Row::DarkMode, Row::WallpaperLink], footer: "Dark mode lightens text against a dark background." },
+                Group { header: "Appearance", rows: &[Row::DarkMode], footer: "Dark mode lightens text against a dark background." },
                 Group { header: "Motion", rows: &[Row::Animation], footer: "A card zooms out of the icon when an app opens." },
                 Group { header: "Screen", rows: &[Row::Rotation], footer: "Turns with the Kindle while Auto is on. Tap the value to set it by hand." },
             ],
@@ -156,11 +156,6 @@ impl Page {
                     header: "Launcher",
                     rows: &[Row::Wallpaper(WallpaperTarget::Home), Row::Wallpaper(WallpaperTarget::Sleep)],
                     footer: "The Sleep Screen picture is used when the Kindle goes to sleep with Launcher open.",
-                },
-                Group {
-                    header: "Startup",
-                    rows: &[Row::Wallpaper(WallpaperTarget::Startup)],
-                    footer: "Shown after the Kindle startup screen when Launcher is set to start automatically.",
                 },
             ],
             Page::Accessibility => &[
@@ -177,12 +172,16 @@ impl Page {
             ],
             Page::Battery => &[
                 Group { header: "Current charge", rows: &[Row::BatteryReading, Row::LowPower], footer: "Low power mode dims the front light when enabled and pauses automatic Store checks." },
-                Group { header: "Power settings", rows: &[Row::BatteryDisplay, Row::BatteryWifi, Row::StoreSettings], footer: "" },
             ],
             Page::Sleep => &[Group {
                 header: "Sleep screen",
                 rows: &[Row::SleepScreen],
                 footer: "Use Launcher pictures, or return to the Kindle screensaver after opening the Kindle UI or restarting.",
+            },
+            Group {
+                header: "Sleep after",
+                rows: &[Row::ScreenTimeout],
+                footer: "How long the screen stays on before the Kindle sleeps. Never keeps it on, which uses more battery.",
             }],
             Page::Apps => &[
                 Group { header: "Management", rows: &[Row::ManageInstalled], footer: "" },
@@ -215,11 +214,14 @@ impl Page {
 }
 
 /// The Settings list: its groups, each a header, a card of pages, and nothing under it.
+/// The Settings list, grouped as on iPhone: connectivity, then the screen, then the battery, then the apps, then the
+/// device itself. Each group keeps its pages in the order they are used.
 const SETTINGS_GROUPS: &[(&str, &[Page])] = &[
-    ("Power and display", &[Page::Battery, Page::Display, Page::Accessibility, Page::Sleep]),
     ("Network", &[Page::Wifi, Page::Connection, Page::FileTransfer]),
+    ("Display", &[Page::Display, Page::Wallpaper, Page::Accessibility, Page::Sleep]),
+    ("Battery", &[Page::Battery]),
     ("Applications", &[Page::Apps, Page::Store]),
-    ("System", &[Page::Storage, Page::Device, Page::DateTime, Page::About]),
+    ("Device", &[Page::Device, Page::About, Page::Storage, Page::DateTime]),
 ];
 
 /// A group of the Settings list: its header, its card, and the page rows in it.
@@ -284,6 +286,7 @@ pub enum Button {
     PowerOff,
     DarkMode,
     Animation,
+    ScreenTimeout,
     /// The Wi-Fi password screen: show or hide the password; join.
     PasswordShow,
     PasswordJoin,
@@ -299,6 +302,8 @@ pub enum QuickTile {
     AutoRotate,
     DarkMode,
     Animation,
+    /// The screen timeout, cycled through the choices (its label shows the current one).
+    ScreenTimeout,
     Ssh,
     AllSettings,
     /// The power menu: Cancel, Restart, Power off (what a long press of the power button gives on the Kindle).
@@ -316,11 +321,12 @@ pub enum Row {
     Frontlight,
     Warmth,
     DarkMode,
-    WallpaperLink,
     Wallpaper(WallpaperTarget),
     Wifi,
     Rotation,
     Animation,
+    /// The screen timeout: how long the screen stays on before the Kindle sleeps (quick settings cycle it too).
+    ScreenTimeout,
     Ssh,
     SshPassword,
     SshAddress,
@@ -354,17 +360,16 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 40] = [
+    pub const ALL: [Row; 39] = [
         Row::Frontlight,
         Row::Warmth,
         Row::DarkMode,
-        Row::WallpaperLink,
         Row::Wallpaper(WallpaperTarget::Home),
         Row::Wallpaper(WallpaperTarget::Sleep),
-        Row::Wallpaper(WallpaperTarget::Startup),
         Row::Wifi,
         Row::Rotation,
         Row::Animation,
+        Row::ScreenTimeout,
         Row::Ssh,
         Row::SshPassword,
         Row::SshAddress,
@@ -391,9 +396,9 @@ impl Row {
             Row::Frontlight => "Front light",
             Row::Warmth => "Warmth",
             Row::DarkMode => "Dark mode",
-            Row::WallpaperLink => "Wallpaper",
             Row::Wallpaper(target) => target.title(),
             Row::Animation => "Opening animation",
+            Row::ScreenTimeout => "Sleep after",
             Row::Wifi => "Wi-Fi",
             Row::Rotation => "Rotation",
             Row::Ssh => "SSH server (port 2222)",
@@ -571,7 +576,6 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         ],
         Row::Hidden => vec![(Button::ShowHidden, Rect::new(r.right() - SWITCH_INSET - 200, r.y + (r.h - SWITCH_H) / 2, 200, SWITCH_H))],
         Row::AppVisibility => vec![(Button::OpenPage(Page::AppVisibility), r)],
-        Row::WallpaperLink => vec![(Button::OpenPage(Page::Wallpaper), r)],
         Row::Wallpaper(target) => vec![(Button::OpenWallpaperPicker(target), r)],
         Row::ManageInstalled => vec![(Button::ManageInstalled, r)],
         Row::GridColumns => vec![(Button::GridColumns, r)],
@@ -592,6 +596,7 @@ fn row_buttons(l: &Layout, row: Row, r: Rect) -> Vec<(Button, Rect)> {
         Row::Wifi => vec![(Button::Wifi, r)],
         Row::DarkMode => vec![(Button::DarkMode, r)],
         Row::Animation => vec![(Button::Animation, r)],
+        Row::ScreenTimeout => vec![(Button::ScreenTimeout, r)],
         Row::Ssh => vec![(Button::Ssh, r)],
         Row::SshPassword => vec![(Button::SshPassword, r)],
         Row::SshAddress => vec![],
@@ -922,17 +927,18 @@ impl Layout {
 
     /// The six round icon buttons in one row, under the header: Airplane, Auto-rotate, Dark mode, Animation, SSH,
     /// All settings. Each slot is a column of the row; the circle is `QUICK_BUTTON_D` wide, centred in it.
-    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 7] {
-        let slot = (self.width - 2 * QUICK_SIDE) / 7;
+    pub fn quick_buttons(&self) -> [(QuickTile, Rect); 8] {
+        let slot = (self.width - 2 * QUICK_SIDE) / 8;
         let at = |i: i32| Rect::new(QUICK_SIDE + i * slot, QUICK_HEAD_H, slot, QUICK_BUTTONS_H);
         [
             (QuickTile::Airplane, at(0)),
             (QuickTile::AutoRotate, at(1)),
             (QuickTile::DarkMode, at(2)),
             (QuickTile::Animation, at(3)),
-            (QuickTile::Ssh, at(4)),
-            (QuickTile::AllSettings, at(5)),
-            (QuickTile::Power, at(6)),
+            (QuickTile::ScreenTimeout, at(4)),
+            (QuickTile::Ssh, at(5)),
+            (QuickTile::AllSettings, at(6)),
+            (QuickTile::Power, at(7)),
         ]
     }
 
@@ -1394,6 +1400,16 @@ mod tests {
     }
 
     #[test]
+    fn the_battery_and_usage_pages_fit_without_scrolling() {
+        let l = oasis();
+        for page in [Page::Battery, Page::Sleep] {
+            let sections = l.page_sections(page);
+            let last = sections.last().unwrap();
+            assert!(last.card.bottom() < l.height - 300, "{page:?}: the last section must be on screen (bottom {}, height {})", last.card.bottom(), l.height);
+        }
+    }
+
+    #[test]
     fn settings_pages_fit_and_buttons_hit() {
         let l = oasis();
         let sections = l.page_sections(Page::Display);
@@ -1406,15 +1422,15 @@ mod tests {
         let d = l.done_button();
         assert_eq!(l.settings_button_at(Page::Display, (d.x + 1) as f32, (d.y + 1) as f32), Some(Button::Done));
         let top = l.settings_home_rows(0);
-        assert_eq!(top.len() + 3, Page::ALL.len()); // App visibility, Installed apps and Wallpaper are nested.
+        assert_eq!(top.len() + 2, Page::ALL.len()); // App visibility and Installed apps are nested.
         let viewport = l.settings_viewport();
         assert!(top.last().unwrap().1.bottom() > viewport.bottom());
         let scroll = l.settings_scroll_max();
         let bottom = l.settings_home_rows(scroll);
         let (page, r) = *bottom.last().unwrap();
-        assert_eq!(page, Page::About);
+        assert_eq!(page, Page::DateTime);
         assert!(r.bottom() <= viewport.bottom());
-        assert_eq!(l.settings_home_at(scroll, (r.x + 5) as f32, (r.y + 5) as f32), Some(Page::About));
+        assert_eq!(l.settings_home_at(scroll, (r.x + 5) as f32, (r.y + 5) as f32), Some(Page::DateTime));
         assert_eq!(l.settings_home_at(scroll, 50.0, (viewport.y - 1) as f32), None);
         assert_eq!(l.visibility_at(200, 50.0, (l.visibility_viewport().y - 1) as f32), None);
         assert_eq!(l.visibility_at(200, 50.0, l.visibility_viewport().y as f32), Some(1));
