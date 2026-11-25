@@ -20,6 +20,8 @@ pub enum Screen {
     Settings,
     /// "Open the Kindle UI?" over the previous screen.
     ConfirmKindle,
+    /// Restart the launcher after a double press of the power key (the open app is closed).
+    ConfirmRestart,
     /// The power menu: Cancel, Restart, Power off (opened by the Power tile in quick settings).
     PowerMenu,
     Sleep,
@@ -62,6 +64,10 @@ pub enum Input {
     Sleep,
     /// `powerd` left the screensaver.
     Wake,
+    /// The power key was pressed once (decided after the double-press window): sleep, or wake when asleep.
+    PowerSingle,
+    /// The power key was pressed twice within the window: confirm, then restart the launcher.
+    PowerDouble,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +86,12 @@ pub enum DeviceCmd {
     PowerOff,
     /// Settings > Device > Launcher: start the launcher again (the supervisor starts it, as after an install).
     RestartLauncher,
+    /// Put the Kindle to sleep (the launcher holds the power key, so the power daemon does not see the press).
+    SleepNow,
+    /// Wake the Kindle from the sleep the launcher started.
+    WakeNow,
+    /// Close the open app, then restart the launcher.
+    QuitAppAndRestart,
     /// Primitive Store: install the entry at this index of `Ui::store` (its position in the list).
     StoreInstall(usize),
     /// Primitive Store: download the catalog again (the Refresh button).
@@ -1724,6 +1736,18 @@ impl Ui {
             return Action::None;
         }
         match input {
+            Input::PowerSingle => {
+                return Action::Device(if self.screen == Screen::Sleep { DeviceCmd::WakeNow } else { DeviceCmd::SleepNow });
+            }
+            Input::PowerDouble => {
+                if self.screen == Screen::Sleep {
+                    // Wake first; the wake event then shows the confirmation.
+                    self.before_sleep = Screen::ConfirmRestart;
+                    return Action::Device(DeviceCmd::WakeNow);
+                }
+                self.go(Screen::ConfirmRestart);
+                return Action::Redraw { full: true };
+            }
             Input::Sleep => {
                 if self.screen != Screen::Sleep {
                     self.before_sleep = self.screen;
@@ -1761,6 +1785,7 @@ impl Ui {
             Screen::SshPassword => self.ssh_password_screen(input),
             Screen::DeviceName => self.device_name_screen(input),
             Screen::ConfirmKindle => self.confirm(input),
+            Screen::ConfirmRestart => self.confirm_restart(input),
             Screen::PowerMenu => self.power_menu(input),
             Screen::AppMenu => self.app_menu(input),
             Screen::Extensions => self.extensions_list(input),
@@ -2319,6 +2344,18 @@ impl Ui {
         } else if restart.inset(-12).contains(x, y) {
             Action::Device(DeviceCmd::Restart)
         } else if cancel.inset(-12).contains(x, y) || !self.layout.power_box().contains(x, y) {
+            self.go(Screen::Home)
+        } else {
+            Action::None
+        }
+    }
+
+    fn confirm_restart(&mut self, input: Input) -> Action {
+        let Input::Tap(x, y) = input else { return Action::None };
+        let [(_, cancel), (_, restart)] = self.layout.confirm_buttons();
+        if restart.inset(-12).contains(x, y) {
+            Action::Device(DeviceCmd::QuitAppAndRestart)
+        } else if cancel.inset(-12).contains(x, y) || !self.layout.confirm_box().contains(x, y) {
             self.go(Screen::Home)
         } else {
             Action::None
@@ -3038,6 +3075,37 @@ mod tests {
         assert_eq!(u.store_tab, StoreTab::Apps);
         assert_eq!(u.store_collection.as_deref(), Some("collection-10"));
         assert_eq!(u.store_list_scroll, 0);
+    }
+
+    #[test]
+    fn a_single_power_press_sleeps_and_wakes_through_the_device_when_the_launcher_holds_the_key() {
+        let mut u = ui(0);
+        assert_eq!(u.handle(Input::PowerSingle), Action::Device(DeviceCmd::SleepNow));
+        u.handle(Input::Sleep);
+        assert_eq!(u.screen, Screen::Sleep);
+        assert_eq!(u.handle(Input::PowerSingle), Action::Device(DeviceCmd::WakeNow), "the press wakes the Kindle");
+    }
+
+    #[test]
+    fn a_double_power_press_asks_before_restarting_the_launcher() {
+        let mut u = ui(0);
+        assert_eq!(u.handle(Input::PowerDouble), Action::Redraw { full: true });
+        assert_eq!(u.screen, Screen::ConfirmRestart, "the owner is asked first");
+        let [(_, cancel), (_, restart)] = u.layout.confirm_buttons();
+        assert!(matches!(u.handle(Input::Tap(cancel.x as f32 + 4.0, cancel.y as f32 + 4.0)), Action::Redraw { .. }));
+        assert_eq!(u.screen, Screen::Home, "Cancel changes nothing");
+        u.handle(Input::PowerDouble);
+        let restart_at = (restart.x as f32 + 4.0, restart.y as f32 + 4.0);
+        assert_eq!(u.handle(Input::Tap(restart_at.0, restart_at.1)), Action::Device(DeviceCmd::QuitAppAndRestart));
+    }
+
+    #[test]
+    fn a_double_press_while_asleep_wakes_first_and_then_asks() {
+        let mut u = ui(0);
+        u.handle(Input::Sleep);
+        assert_eq!(u.handle(Input::PowerDouble), Action::Device(DeviceCmd::WakeNow));
+        assert_eq!(u.handle(Input::Wake), Action::Redraw { full: true });
+        assert_eq!(u.screen, Screen::ConfirmRestart, "the confirmation shows once the Kindle is awake");
     }
 
     #[test]

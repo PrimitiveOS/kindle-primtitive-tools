@@ -575,6 +575,7 @@ impl Renderer {
             Screen::DeviceName => self.device_name_screen(ui),
             // The dialog is a pop-up over the grid, drawn last (below).
             Screen::ConfirmKindle => self.home(ui, status, &mut icon_blits),
+            Screen::ConfirmRestart => self.home(ui, status, &mut icon_blits),
             Screen::PowerMenu => self.home(ui, status, &mut icon_blits),
             // A sleep picture replaces the text, except for a battery warning, which matters more.
             Screen::Sleep => {
@@ -594,7 +595,7 @@ impl Renderer {
         let mut out = self.finish_gray();
         let wallpaper = if let Some(draft) = home_preview {
             self.wallpaper_preview.as_ref().filter(|_| draft.has_opacity()).map(|picture| (picture, draft.opacity))
-        } else if matches!(screen, Screen::Home | Screen::ConfirmKindle | Screen::PowerMenu | Screen::AppMenu | Screen::QuickSettings) {
+        } else if matches!(screen, Screen::Home | Screen::ConfirmKindle | Screen::ConfirmRestart | Screen::PowerMenu | Screen::AppMenu | Screen::QuickSettings) {
             self.home_wallpaper.as_ref().map(|picture| (picture, ui.wallpapers.opacity(WallpaperTarget::Home)))
         } else {
             None
@@ -636,6 +637,7 @@ impl Renderer {
         // Pop-ups are drawn in a second pass and copied over the screen, so icon pictures stay under them.
         let popup = match ui.screen {
             Screen::ConfirmKindle => Some(l.confirm_box()),
+            Screen::ConfirmRestart => Some(l.confirm_box()),
             Screen::PowerMenu => Some(l.power_box()),
             Screen::AppMenu => Some(l.menu_box(ui.menu_anchor(), ui.menu_actions().len())),
             Screen::QuickSettings => Some(l.quick_panel()),
@@ -654,6 +656,7 @@ impl Renderer {
             self.fill(l.screen(), WHITE);
             match ui.screen {
                 Screen::ConfirmKindle => self.confirm(&l),
+                Screen::ConfirmRestart => self.confirm_restart(&l),
                 Screen::PowerMenu => self.power_menu_box(&l),
                 Screen::QuickSettings => self.quick_panel(&l, status),
                 Screen::StoreApp if ui.store_sheet.is_some() => self.store_install_sheet(ui),
@@ -674,7 +677,7 @@ impl Renderer {
         }
         // Over an app, the system's pop-ups float over the app's screen: every pixel outside the pop-up is the app's.
         if let (Some(backdrop), Some(b)) = (self.backdrop.as_ref(), popup) {
-            if matches!(ui.screen, Screen::QuickSettings | Screen::PowerMenu | Screen::ConfirmKindle | Screen::AppMenu)
+            if matches!(ui.screen, Screen::QuickSettings | Screen::PowerMenu | Screen::ConfirmKindle | Screen::ConfirmRestart | Screen::AppMenu)
                 && backdrop.len() == out.len()
             {
                 image::keep_area(&mut out, backdrop, width, (b.x - halo, b.y - halo, b.w + 2 * halo, b.h + 2 * halo));
@@ -2289,6 +2292,27 @@ impl Renderer {
         let [(_, cancel), (_, open)] = l.confirm_buttons();
         self.button(cancel, "Cancel", false);
         self.button(open, "Open Kindle UI", true);
+    }
+
+    fn confirm_restart(&mut self, l: &Layout) {
+        let b = l.confirm_box();
+        self.rounded_frame(b, POPUP_RADIUS as f64, 6, BLACK, WHITE);
+        let inner = b.inset(48);
+        self.text(Text { text: "Restart the launcher?", x: inner.x as f32, y: inner.y as f32, w: inner.w as f32, size: 50.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        self.text(Text {
+            text: "The app you have open closes, and the launcher starts again. Unsaved work in that app is lost.",
+            x: inner.x as f32,
+            y: inner.y as f32 + 100.0,
+            w: inner.w as f32,
+            size: 36.0,
+            bold: false,
+            align: Align::Start,
+            lines: 4,
+            gray: BLACK,
+        });
+        let [(_, cancel), (_, restart)] = l.confirm_buttons();
+        self.button(cancel, "Cancel", false);
+        self.button(restart, "Restart", true);
     }
 
     /// A full-screen message (e.g. "Starting the Kindle UI"): a title and a body, centred.
