@@ -23,6 +23,10 @@ pub enum Ev {
     Background { name: String, line: String, ok: bool },
     /// A Wi-Fi scan finished.
     Wifi(kl_core::wifi::WifiInfo),
+    /// The sound level changed (`None`: no headphones are connected, so the sound row is hidden).
+    Sound(Option<u8>),
+    /// The media session quick settings shows changed (`None`: no app plays or is paused).
+    Media(Option<kl_core::media::MediaSession>),
     /// A page-turn key was pressed (`down`) or released: the launcher times a hold of both (restart).
     PageKey { code: u16, down: bool },
     /// The two-button hold may be complete: check it.

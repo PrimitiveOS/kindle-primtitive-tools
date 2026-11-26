@@ -16,6 +16,7 @@ use kl_core::{battery::{Reading, Source}, rotation::Debouncer};
 pub use kl_core::{Input, Rotation, Settings, Status, Usb};
 
 pub mod bluetooth;
+pub mod media;
 pub mod profile;
 
 pub fn log(msg: &str) {
@@ -404,6 +405,8 @@ pub fn status(settings: &Settings) -> Status {
     let ip = wlan_ip();
     let ssh = ssh_running();
     let bluetooth_on = bluetooth::is_on();
+    // The connected headphones (the status bar and quick settings show them), from the last list read.
+    let headphones = if bluetooth_on { bluetooth::connected_name() } else { None };
     // The connect command, shown while the server runs (the address is the Kindle's Wi-Fi address).
     let ssh_address = match (ssh, ip.as_str()) {
         (false, _) => String::new(),
@@ -449,7 +452,9 @@ pub fn status(settings: &Settings) -> Status {
         wifi_state,
         wifi_signal: lipc_text(WIFID, "signalStrength").and_then(|t| kl_core::wifi::parse_signal(&t)),
         bluetooth_on,
-        bluetooth_connected: if bluetooth_on { bluetooth::connected_name() } else { None },
+        bluetooth_connected: headphones.clone(),
+        sound_level: headphones.as_ref().and_then(|_| sound_level()),
+        media: media::current(),
         light: light.unwrap_or(0),
         warmth: warmth.unwrap_or(0),
         display_support,
@@ -683,6 +688,17 @@ pub fn available_storage_bytes(path: &std::path::Path) -> std::io::Result<u64> {
 
 pub fn set_light(level: u32) {
     let _ = try_set_light(level);
+}
+
+/// The Kindle's sound level, 1 to 8: the audio manager's `speakerVolume` (10 to 80 in steps of 10).
+pub fn sound_level() -> Option<u8> {
+    let volume = get_int("com.lab126.audiomgrd", "speakerVolume")?;
+    Some(((volume / 10) as u8).clamp(1, kl_core::layout::SOUND_LEVELS))
+}
+
+/// Set the sound level (1 to 8). Returns whether the audio manager took it.
+pub fn set_sound_level(level: u8) -> bool {
+    set_int("com.lab126.audiomgrd", "speakerVolume", u32::from(level.clamp(1, kl_core::layout::SOUND_LEVELS)) * 10)
 }
 
 pub fn light_level() -> Option<u32> {

@@ -960,16 +960,25 @@ impl Renderer {
             self.draw_icon(icon, ix, iy, size, fg);
             self.text(Text { text: &label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
         }
-        for row in 0..2 {
-            let (icon, label, value, available) = if row == 0 {
-                (primitive_quick::icons::SUN, "Front light", s.light, s.display_support.front_light)
-            } else {
-                (primitive_quick::icons::WARMTH, "Warmth", s.warmth, s.display_support.warmth)
+        for row in 0..l.quick_rows() {
+            let (icon, label, value, available) = match row {
+                0 => (primitive_quick::icons::SUN, "Front light", s.light, s.display_support.front_light),
+                1 => (primitive_quick::icons::WARMTH, "Warmth", s.warmth, s.display_support.warmth),
+                _ => (
+                    primitive_quick::icons::SPEAKER,
+                    "Sound",
+                    s.sound_level.map_or(0, kl_core::layout::sound_step),
+                    s.sound_level.is_some(),
+                ),
             };
             let r = l.quick_row(row);
             self.draw_icon(icon, (r.x + 28) as f64, (r.y + 14) as f64, 40.0, BLACK);
             self.text(Text { text: label, x: (r.x + 92) as f32, y: (r.y + 18) as f32, w: 400.0, size: 30.0, bold: false, align: Align::Start, lines: 1, gray: BLACK });
-            let level = if available { value.to_string() } else { "Unavailable".into() };
+            let level = match (available, row) {
+                (false, _) => "Unavailable".into(),
+                (true, 2) => format!("{} of {}", s.sound_level.unwrap_or(0), kl_core::layout::SOUND_LEVELS),
+                _ => value.to_string(),
+            };
             self.text(Text { text: &level, x: 0.0, y: (r.y + 22) as f32, w: (r.w - 28) as f32, size: 26.0, bold: false, align: Align::End, lines: 1, gray: 85 });
             if available {
                 self.level_bar(l.quick_bar(row), value);
@@ -977,10 +986,37 @@ impl Renderer {
                 self.round_button(l.quick_plus(row), true);
             }
         }
+        if let Some(session) = &s.media {
+            self.media_card(l, session);
+        }
         self.quick_system(l, s);
         let handle = l.quick_handle();
         self.stroke_icon("M6 15 L12 9 L18 15", (handle.x + handle.w / 2 - 16) as f64, (handle.y + 8) as f64, 32.0, 2.4, BLACK);
         self.text(Text { text: "Swipe up to close", x: handle.x as f32, y: (handle.y + 40) as f32, w: handle.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
+    }
+
+    /// The media card: the track and its state, and previous, play or pause, and next.
+    fn media_card(&mut self, l: &Layout, m: &kl_core::media::MediaSession) {
+        let card = l.quick_media();
+        self.rounded_frame(card, 24.0, 3, BLACK, WHITE);
+        let text = l.quick_media_text();
+        let title = if m.title.is_empty() { m.name.as_str() } else { m.title.as_str() };
+        self.text(Text { text: title, x: text.x as f32, y: text.y as f32, w: text.w as f32, size: 34.0, bold: true, align: Align::Start, lines: 1, gray: BLACK });
+        let state = if m.playing { "Playing" } else { "Paused" };
+        let time = if m.length > 0 { format!("{} of {}", clock_text(m.position), clock_text(m.length)) } else { clock_text(m.position) };
+        let caption = format!("{} · {} · {}", m.name, state, time);
+        self.text(Text { text: &caption, x: text.x as f32, y: (text.y + 46) as f32, w: text.w as f32, size: 24.0, bold: false, align: Align::Start, lines: 1, gray: 85 });
+        let (previous, play, next) = l.quick_media_buttons();
+        for (button, icon) in [(previous, primitive_quick::icons::MEDIA_PREVIOUS), (next, primitive_quick::icons::MEDIA_NEXT)] {
+            self.touch(button, button.w as f64 / 2.0);
+            self.rounded_frame(button, button.w as f64 / 2.0, 3, BLACK, WHITE);
+            self.draw_icon(icon, (button.x + 16) as f64, (button.y + 16) as f64, 40.0, BLACK);
+        }
+        // Play or pause is solid, with a white glyph, as the primary control.
+        self.touch(play, play.w as f64 / 2.0);
+        self.rounded(play, play.w as f64 / 2.0, BLACK);
+        let symbol = if m.playing { primitive_quick::icons::MEDIA_PAUSE } else { primitive_quick::icons::MEDIA_PLAY };
+        self.draw_icon(symbol, (play.x + 24) as f64, (play.y + 24) as f64, 40.0, WHITE);
     }
 
     fn level_bar(&mut self, bar: Rect, level: u32) {
@@ -3279,4 +3315,10 @@ mod tests {
         assert_eq!(changed_rect(&a, &b, 32), Some((8, 1, 16, 4)));
         assert_eq!(changed_rect(&a, &[0u8; 4], 32), Some((0, 0, 32, 0)));
     }
+}
+
+/// A time as minutes and seconds ("1:23", or "1:02:09" from an hour).
+fn clock_text(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }

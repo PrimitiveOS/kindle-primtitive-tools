@@ -224,6 +224,12 @@ pub fn is_on(state: &str) -> bool {
     matches!(state.trim(), "1" | "2")
 }
 
+/// The connected device's name, from the stack's `ListConnected` report. An empty report, or a device the stack marks
+/// as not connected, gives `None`: a headset put in its case leaves the list, so the status bar stops showing it.
+pub fn connected_name_in(connected_list: &str) -> Option<String> {
+    BtInfo { on: true, devices: parse_devices(connected_list) }.connected_name()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +345,14 @@ mod tests {
         assert!(is_on("1\n"));
         assert!(is_on("2"));
         assert!(!is_on(""));
+    }
+
+    #[test]
+    fn a_device_that_left_the_connected_list_is_not_shown() {
+        let connected = "Hash Index: 0\n\tbd_name = \"AirPods Pro\"\n\tbd_address = \"AA:BB:CC:DD:EE:01\"\n\tclass_of_device = \"Audio/Video\"\n\tis_paired = (1)\n\tis_connected = (1)\n\tis_discovered = (0)\n";
+        assert_eq!(connected_name_in(connected).as_deref(), Some("AirPods Pro"));
+        assert_eq!(connected_name_in(""), None, "nothing connected");
+        let in_case = connected.replace("is_connected = (1)", "is_connected = (0)");
+        assert_eq!(connected_name_in(&in_case), None, "paired but not connected is not shown");
     }
 }
