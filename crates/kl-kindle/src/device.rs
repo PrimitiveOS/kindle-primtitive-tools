@@ -7,6 +7,7 @@ use kl_core::Rotation;
 use crate::Ev;
 
 pub use primitive_device::bluetooth;
+pub use primitive_device::media;
 pub use primitive_device::{
     accelerometer_turn, available_storage_bytes, check_ssh, forget_network, free_storage,
     join_network, launcher_dir, light_level, local_time, power_event, refresh_clock, refresh_screen_timeout, restart_launcher, set_screen_timeout,

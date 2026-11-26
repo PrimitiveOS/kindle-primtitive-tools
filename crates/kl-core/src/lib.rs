@@ -9,6 +9,7 @@ pub mod battery;
 pub mod config;
 pub mod kual;
 pub mod layout;
+pub mod media;
 pub mod rotation;
 pub mod scriptlet;
 pub mod settings;

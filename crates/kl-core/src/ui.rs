@@ -136,6 +136,8 @@ pub enum DeviceCmd {
     /// Quick settings' sound row: a change by `step` levels, or the level (1 to 8) it picks.
     Sound(i32),
     SetSound(u8),
+    /// The media card's buttons, sent to the playing app (its `.cmd` file).
+    Media(crate::media::MediaCommand),
     /// Quick settings > Auto-rotate: off keeps the screen as it is now; on follows the turn again.
     ToggleAutoRotation,
 }
@@ -255,6 +257,8 @@ pub struct Status {
     pub warmth: u32,
     /// The sound level (1 to 8), when headphones are connected; the sound row shows it.
     pub sound_level: Option<u8>,
+    /// The media session the card shows (an app plays or is paused), from the driver.
+    pub media: Option<crate::media::MediaSession>,
     pub display_support: DisplaySupport,
     pub large_text: bool,
     pub high_contrast: bool,
@@ -408,6 +412,8 @@ pub struct Ui {
     pub layout: Layout,
     /// The sound level the sound row shows (`None` when no headphones are connected).
     sound_level: Option<u8>,
+    /// The media card's session (`None`: no card).
+    media: Option<crate::media::MediaSession>,
     pub display_support: DisplaySupport,
     pub page: usize,
     pub settings_scroll: i32,
@@ -533,6 +539,7 @@ impl Ui {
         let (hidden_apps, apps): (Vec<App>, Vec<App>) = apps.into_iter().partition(|a| a.hidden);
         Ui {
             sound_level: None,
+            media: None,
             apps,
             hidden_apps,
             layout,
@@ -726,6 +733,15 @@ impl Ui {
         let changed = self.sound_level != level || self.layout.sound != shown;
         self.sound_level = level;
         self.layout.sound = shown;
+        changed
+    }
+
+    /// The media session for the card, from the driver. Returns whether the card changed.
+    pub fn set_media(&mut self, session: Option<crate::media::MediaSession>) -> bool {
+        let shown = session.is_some();
+        let changed = self.media != session || self.layout.media != shown;
+        self.media = session;
+        self.layout.media = shown;
         changed
     }
 
@@ -2048,6 +2064,18 @@ impl Ui {
                         QuickTile::AllSettings => self.open_settings(),
                         QuickTile::Power => self.go(Screen::PowerMenu),
                     };
+                }
+                if self.media.is_some() {
+                    let (previous, play, next) = l.quick_media_buttons();
+                    for (button, command) in [
+                        (previous, crate::media::MediaCommand::Previous),
+                        (play, crate::media::MediaCommand::Toggle),
+                        (next, crate::media::MediaCommand::Next),
+                    ] {
+                        if button.inset(-10).contains(x, y) {
+                            return Action::Device(DeviceCmd::Media(command));
+                        }
+                    }
                 }
                 for row in 0..l.quick_rows() {
                     if row == 2 {
@@ -4178,5 +4206,22 @@ mod tests {
         assert!(u.set_sound(None), "headphones leave: the row goes");
         assert_eq!(u.layout.quick_rows(), 2);
         assert_eq!(u.handle(centre(u.layout.quick_plus(1))), Action::Device(DeviceCmd::Warmth(1)));
+    }
+
+    #[test]
+    fn the_media_card_sends_its_commands_and_shows_only_with_a_session() {
+        use crate::media::{MediaCommand, MediaSession};
+        let mut u = ui(1);
+        let session = MediaSession { app: "music".into(), name: "Music".into(), playing: true, title: "A".into(), ..Default::default() };
+        assert!(u.set_media(Some(session.clone())), "the card appears");
+        assert!(!u.set_media(Some(session)), "the same session is not a change");
+        assert!(u.layout.quick_media_h() > 0);
+        u.screen = Screen::QuickSettings;
+        let (previous, play, next) = u.layout.quick_media_buttons();
+        assert_eq!(u.handle(centre(previous)), Action::Device(DeviceCmd::Media(MediaCommand::Previous)));
+        assert_eq!(u.handle(centre(play)), Action::Device(DeviceCmd::Media(MediaCommand::Toggle)));
+        assert_eq!(u.handle(centre(next)), Action::Device(DeviceCmd::Media(MediaCommand::Next)));
+        assert!(u.set_media(None), "the session ends: the card goes");
+        assert_eq!(u.layout.quick_media_h(), 0);
     }
 }

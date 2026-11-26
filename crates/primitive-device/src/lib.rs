@@ -16,6 +16,7 @@ use kl_core::{battery::{Reading, Source}, rotation::Debouncer};
 pub use kl_core::{Input, Rotation, Settings, Status, Usb};
 
 pub mod bluetooth;
+pub mod media;
 pub mod profile;
 
 pub fn log(msg: &str) {
@@ -453,6 +454,7 @@ pub fn status(settings: &Settings) -> Status {
         bluetooth_on,
         bluetooth_connected: headphones.clone(),
         sound_level: headphones.as_ref().and_then(|_| sound_level()),
+        media: media::current(),
         light: light.unwrap_or(0),
         warmth: warmth.unwrap_or(0),
         display_support,

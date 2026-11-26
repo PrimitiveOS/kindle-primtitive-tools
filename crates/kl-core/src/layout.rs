@@ -467,6 +467,8 @@ pub struct Layout {
     pub rows: i32,
     /// Whether the sound row shows in quick settings (headphones are connected).
     pub sound: bool,
+    /// Whether the media card shows in quick settings (an app is playing or paused).
+    pub media: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,6 +504,8 @@ const QUICK_BUTTONS_H: i32 = 170;
 /// The diameter of a round icon button.
 const QUICK_BUTTON_D: i32 = 100;
 const QUICK_ROW_H: i32 = 156;
+/// The media card under the round buttons, when a session plays or is paused.
+const QUICK_MEDIA_H: i32 = 176;
 const QUICK_HANDLE_H: i32 = 72;
 /// The system section under the level rows: a header, then one row each for CPU, memory and storage.
 const QUICK_SYSTEM_TOP: i32 = 56;
@@ -681,7 +685,7 @@ fn store_about_top(shots: usize) -> i32 {
 
 impl Layout {
     pub fn new(width: u32, height: u32, cols: u32, rows: u32) -> Layout {
-        Layout { width: width as i32, height: height as i32, cols: cols.clamp(3, 5) as i32, rows: rows.clamp(3, 6) as i32, sound: false }
+        Layout { width: width as i32, height: height as i32, cols: cols.clamp(3, 5) as i32, rows: rows.clamp(3, 6) as i32, sound: false, media: false }
     }
 
     pub fn screen(&self) -> Rect {
@@ -947,8 +951,34 @@ impl Layout {
 
     /// Quick settings: a sheet from the top edge.
     pub fn quick_panel(&self) -> Rect {
-        let h = QUICK_HEAD_H + QUICK_BUTTONS_H + self.quick_rows() as i32 * QUICK_ROW_H + QUICK_SYSTEM_TOP + 3 * QUICK_STAT_H + 20 + QUICK_HANDLE_H;
+        let h = QUICK_HEAD_H + QUICK_BUTTONS_H + self.quick_media_h() + self.quick_rows() as i32 * QUICK_ROW_H + QUICK_SYSTEM_TOP + 3 * QUICK_STAT_H + 20 + QUICK_HANDLE_H;
         Rect::new(0, 0, self.width, h)
+    }
+
+    /// The height of the media card (0 when no session shows).
+    pub fn quick_media_h(&self) -> i32 {
+        if self.media { QUICK_MEDIA_H } else { 0 }
+    }
+
+    /// The media card: the title and state on the left, previous, play or pause and next on the right.
+    pub fn quick_media(&self) -> Rect {
+        Rect::new(QUICK_SIDE, QUICK_HEAD_H + QUICK_BUTTONS_H + 12, self.width - 2 * QUICK_SIDE, QUICK_MEDIA_H - 24)
+    }
+
+    /// The previous, play or pause, and next buttons of the media card.
+    pub fn quick_media_buttons(&self) -> (Rect, Rect, Rect) {
+        let card = self.quick_media();
+        let next = Rect::new(card.right() - 20 - 72, card.y + (card.h - 72) / 2, 72, 72);
+        let play = Rect::new(next.x - 16 - 88, card.y + (card.h - 88) / 2, 88, 88);
+        let previous = Rect::new(play.x - 16 - 72, card.y + (card.h - 72) / 2, 72, 72);
+        (previous, play, next)
+    }
+
+    /// The title and state text of the media card: the space left of its buttons.
+    pub fn quick_media_text(&self) -> Rect {
+        let card = self.quick_media();
+        let (previous, _, _) = self.quick_media_buttons();
+        Rect::new(card.x + 24, card.y + 20, previous.x - card.x - 40, card.h - 40)
     }
 
     /// The level rows shown: light and warmth, and the sound row while headphones are connected.
@@ -1006,7 +1036,7 @@ impl Layout {
 
     /// Level row `i` (0 brightness, 1 warmth), under the icon buttons.
     pub fn quick_row(&self, i: usize) -> Rect {
-        Rect::new(0, QUICK_HEAD_H + QUICK_BUTTONS_H + i as i32 * QUICK_ROW_H, self.width, QUICK_ROW_H)
+        Rect::new(0, QUICK_HEAD_H + QUICK_BUTTONS_H + self.quick_media_h() + i as i32 * QUICK_ROW_H, self.width, QUICK_ROW_H)
     }
 
     /// The − button of level row `i`.
