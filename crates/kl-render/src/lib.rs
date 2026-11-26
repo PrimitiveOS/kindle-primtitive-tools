@@ -3023,6 +3023,12 @@ fn inside_rounded(x: i32, y: i32, w: i32, h: i32, radius: f64) -> bool {
     true
 }
 
+/// A time as minutes and seconds ("1:23", or "1:02:09" from an hour).
+fn clock_text(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3315,10 +3321,4 @@ mod tests {
         assert_eq!(changed_rect(&a, &b, 32), Some((8, 1, 16, 4)));
         assert_eq!(changed_rect(&a, &[0u8; 4], 32), Some((0, 0, 32, 0)));
     }
-}
-
-/// A time as minutes and seconds ("1:23", or "1:02:09" from an hour).
-fn clock_text(secs: u64) -> String {
-    let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
-    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
