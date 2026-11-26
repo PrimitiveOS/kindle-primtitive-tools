@@ -960,16 +960,25 @@ impl Renderer {
             self.draw_icon(icon, ix, iy, size, fg);
             self.text(Text { text: &label, x: slot.x as f32, y: (c.bottom() + 6) as f32, w: slot.w as f32, size: 24.0, bold: false, align: Align::Center, lines: 1, gray: BLACK });
         }
-        for row in 0..2 {
-            let (icon, label, value, available) = if row == 0 {
-                (primitive_quick::icons::SUN, "Front light", s.light, s.display_support.front_light)
-            } else {
-                (primitive_quick::icons::WARMTH, "Warmth", s.warmth, s.display_support.warmth)
+        for row in 0..l.quick_rows() {
+            let (icon, label, value, available) = match row {
+                0 => (primitive_quick::icons::SUN, "Front light", s.light, s.display_support.front_light),
+                1 => (primitive_quick::icons::WARMTH, "Warmth", s.warmth, s.display_support.warmth),
+                _ => (
+                    primitive_quick::icons::SPEAKER,
+                    "Sound",
+                    s.sound_level.map_or(0, kl_core::layout::sound_step),
+                    s.sound_level.is_some(),
+                ),
             };
             let r = l.quick_row(row);
             self.draw_icon(icon, (r.x + 28) as f64, (r.y + 14) as f64, 40.0, BLACK);
             self.text(Text { text: label, x: (r.x + 92) as f32, y: (r.y + 18) as f32, w: 400.0, size: 30.0, bold: false, align: Align::Start, lines: 1, gray: BLACK });
-            let level = if available { value.to_string() } else { "Unavailable".into() };
+            let level = match (available, row) {
+                (false, _) => "Unavailable".into(),
+                (true, 2) => format!("{} of {}", s.sound_level.unwrap_or(0), kl_core::layout::SOUND_LEVELS),
+                _ => value.to_string(),
+            };
             self.text(Text { text: &level, x: 0.0, y: (r.y + 22) as f32, w: (r.w - 28) as f32, size: 26.0, bold: false, align: Align::End, lines: 1, gray: 85 });
             if available {
                 self.level_bar(l.quick_bar(row), value);

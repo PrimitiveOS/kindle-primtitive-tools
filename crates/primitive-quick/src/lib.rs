@@ -175,6 +175,10 @@ pub mod icons {
     pub const BLUETOOTH: Icon = Icon { stroke: &["M7 7.5 L17 16.5 L12 21 V3 L17 7.5 L7 16.5"], fill: &[] };
     /// Headphones: a headband and two ear cups.
     pub const HEADPHONES: Icon = Icon { stroke: &["M4 15 V12 A8 8 0 0 1 20 12 V15", "M4 15 H8 V20 H4 Z", "M16 15 H20 V20 H16 Z"], fill: &[] };
+    /// Sound: a speaker with two waves (the sound row in quick settings).
+    pub const SPEAKER: Icon = Icon {
+        stroke: &["M4 9 H8 L13 5 V19 L8 15 H4 Z", "M16 9 A4 4 0 0 1 16 15", "M18.5 6 A8 8 0 0 1 18.5 18"], fill: &[],
+    };
     /// Settings: a slider with knobs (a gear does not stroke well at small sizes).
     pub const SETTINGS: Icon = Icon {
         stroke: &["M4 7 H20 M4 17 H20", "M9 4.5 V9.5 M15 14.5 V19.5"], fill: &[],

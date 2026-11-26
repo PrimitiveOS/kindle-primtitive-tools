@@ -465,6 +465,8 @@ pub struct Layout {
     pub height: i32,
     pub cols: i32,
     pub rows: i32,
+    /// Whether the sound row shows in quick settings (headphones are connected).
+    pub sound: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -510,6 +512,20 @@ const HEADER_SLOT: i32 = 80;
 const QUICK_NUDGE: i32 = 72;
 /// The level rows' range: 25 steps, 0 to 24 (the Kindle's frontlight and warmth levels).
 pub const QUICK_LEVEL_MAX: u32 = 24;
+/// The Kindle's sound levels: eight (the audio manager's `speakerVolume`, 10 to 80). The sound row shows them on the
+/// same bar as the light and warmth rows: each level is three steps.
+pub const SOUND_LEVELS: u8 = 8;
+
+/// The bar step (0 to `QUICK_LEVEL_MAX`) that shows sound level `level`.
+pub fn sound_step(level: u8) -> u32 {
+    u32::from(level.clamp(0, SOUND_LEVELS)) * QUICK_LEVEL_MAX / u32::from(SOUND_LEVELS)
+}
+
+/// The sound level (1 to `SOUND_LEVELS`) that a bar step picks: the nearest one.
+pub fn sound_level_at(step: u32) -> u8 {
+    let level = (step * u32::from(SOUND_LEVELS) + QUICK_LEVEL_MAX / 2) / QUICK_LEVEL_MAX;
+    (level as u8).clamp(1, SOUND_LEVELS)
+}
 /// The app menu (long press): a box beside the icon, one row per action under the app's name.
 const MENU_W: i32 = 600;
 const MENU_ROW_H: i32 = 100;
@@ -665,7 +681,7 @@ fn store_about_top(shots: usize) -> i32 {
 
 impl Layout {
     pub fn new(width: u32, height: u32, cols: u32, rows: u32) -> Layout {
-        Layout { width: width as i32, height: height as i32, cols: cols.clamp(3, 5) as i32, rows: rows.clamp(3, 6) as i32 }
+        Layout { width: width as i32, height: height as i32, cols: cols.clamp(3, 5) as i32, rows: rows.clamp(3, 6) as i32, sound: false }
     }
 
     pub fn screen(&self) -> Rect {
@@ -931,8 +947,13 @@ impl Layout {
 
     /// Quick settings: a sheet from the top edge.
     pub fn quick_panel(&self) -> Rect {
-        let h = QUICK_HEAD_H + QUICK_BUTTONS_H + 2 * QUICK_ROW_H + QUICK_SYSTEM_TOP + 3 * QUICK_STAT_H + 20 + QUICK_HANDLE_H;
+        let h = QUICK_HEAD_H + QUICK_BUTTONS_H + self.quick_rows() as i32 * QUICK_ROW_H + QUICK_SYSTEM_TOP + 3 * QUICK_STAT_H + 20 + QUICK_HANDLE_H;
         Rect::new(0, 0, self.width, h)
+    }
+
+    /// The level rows shown: light and warmth, and the sound row while headphones are connected.
+    pub fn quick_rows(&self) -> usize {
+        if self.sound { 3 } else { 2 }
     }
 
     /// The clock and date, top left (the status bar and quick settings).
@@ -1014,12 +1035,12 @@ impl Layout {
 
     /// The "System" header above the figures.
     pub fn quick_system_header(&self) -> i32 {
-        self.quick_row(1).bottom() + 8
+        self.quick_row(self.quick_rows() - 1).bottom() + 8
     }
 
     /// System row `i` (0 CPU, 1 memory, 2 storage) under the level rows.
     pub fn quick_stat_row(&self, i: usize) -> Rect {
-        let top = self.quick_row(1).bottom() + QUICK_SYSTEM_TOP;
+        let top = self.quick_row(self.quick_rows() - 1).bottom() + QUICK_SYSTEM_TOP;
         Rect::new(0, top + i as i32 * QUICK_STAT_H, self.width, QUICK_STAT_H)
     }
 

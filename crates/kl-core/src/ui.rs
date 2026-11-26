@@ -133,6 +133,9 @@ pub enum DeviceCmd {
     /// Quick settings' sliders: a level from 0 to 24.
     SetLight(u32),
     SetWarmth(u32),
+    /// Quick settings' sound row: a change by `step` levels, or the level (1 to 8) it picks.
+    Sound(i32),
+    SetSound(u8),
     /// Quick settings > Auto-rotate: off keeps the screen as it is now; on follows the turn again.
     ToggleAutoRotation,
 }
@@ -250,6 +253,8 @@ pub struct Status {
     pub bluetooth_connected: Option<String>,
     pub light: u32,
     pub warmth: u32,
+    /// The sound level (1 to 8), when headphones are connected; the sound row shows it.
+    pub sound_level: Option<u8>,
     pub display_support: DisplaySupport,
     pub large_text: bool,
     pub high_contrast: bool,
@@ -401,6 +406,8 @@ pub struct InstalledApp {
 pub struct Ui {
     apps: Vec<App>,
     pub layout: Layout,
+    /// The sound level the sound row shows (`None` when no headphones are connected).
+    sound_level: Option<u8>,
     pub display_support: DisplaySupport,
     pub page: usize,
     pub settings_scroll: i32,
@@ -525,6 +532,7 @@ impl Ui {
         let original_icons = apps.iter().map(|a| (a.id.clone(), a.icon.clone())).collect();
         let (hidden_apps, apps): (Vec<App>, Vec<App>) = apps.into_iter().partition(|a| a.hidden);
         Ui {
+            sound_level: None,
             apps,
             hidden_apps,
             layout,
@@ -709,6 +717,16 @@ impl Ui {
                 self.screen = Screen::Page(Page::Bluetooth);
             }
         }
+    }
+
+    /// The sound level, from the driver: `Some` while headphones are connected, which shows the sound row. Returns
+    /// whether the row changed (quick settings is redrawn then).
+    pub fn set_sound(&mut self, level: Option<u8>) -> bool {
+        let shown = level.is_some();
+        let changed = self.sound_level != level || self.layout.sound != shown;
+        self.sound_level = level;
+        self.layout.sound = shown;
+        changed
     }
 
     /// The Bluetooth result or error for the notice line. It never carries a device address.
@@ -2031,7 +2049,22 @@ impl Ui {
                         QuickTile::Power => self.go(Screen::PowerMenu),
                     };
                 }
-                for row in 0..2 {
+                for row in 0..l.quick_rows() {
+                    if row == 2 {
+                        if self.sound_level.is_none() {
+                            continue;
+                        }
+                        if l.quick_minus(row).inset(-10).contains(x, y) {
+                            return Action::Device(DeviceCmd::Sound(-1));
+                        }
+                        if l.quick_plus(row).inset(-10).contains(x, y) {
+                            return Action::Device(DeviceCmd::Sound(1));
+                        }
+                        if let Some(step) = l.quick_step(row, x, y) {
+                            return Action::Device(DeviceCmd::SetSound(crate::layout::sound_level_at(step)));
+                        }
+                        continue;
+                    }
                     let supported = if row == 0 { self.display_support.front_light } else { self.display_support.warmth };
                     if !supported {
                         continue;
@@ -4126,5 +4159,24 @@ mod tests {
         u.notice = Some("apps.toml is not valid".into());
         assert_eq!(u.handle(Input::Tap(5.0, 1400.0)), Action::Redraw { full: false });
         assert_eq!(u.notice, None);
+    }
+
+    #[test]
+    fn the_sound_row_shows_with_headphones_and_moves_the_level() {
+        let mut u = ui(1);
+        assert!(!u.layout.sound, "no headphones, no sound row");
+        assert!(u.set_sound(Some(4)), "the row appears");
+        assert_eq!(u.layout.quick_rows(), 3);
+        u.screen = Screen::QuickSettings;
+        assert_eq!(u.handle(centre(u.layout.quick_plus(2))), Action::Device(DeviceCmd::Sound(1)));
+        assert_eq!(u.handle(centre(u.layout.quick_minus(2))), Action::Device(DeviceCmd::Sound(-1)));
+        let bar = u.layout.quick_bar(2);
+        let y = (bar.y + bar.h / 2) as f32;
+        assert_eq!(u.handle(Input::Tap(bar.right() as f32 - 1.0, y)), Action::Device(DeviceCmd::SetSound(8)));
+        assert_eq!(u.handle(Input::Tap(bar.x as f32 + 1.0, y)), Action::Device(DeviceCmd::SetSound(1)));
+        assert!(!u.set_sound(Some(4)), "the same level is not a change");
+        assert!(u.set_sound(None), "headphones leave: the row goes");
+        assert_eq!(u.layout.quick_rows(), 2);
+        assert_eq!(u.handle(centre(u.layout.quick_plus(1))), Action::Device(DeviceCmd::Warmth(1)));
     }
 }
