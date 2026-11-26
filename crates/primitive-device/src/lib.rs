@@ -690,15 +690,25 @@ pub fn set_light(level: u32) {
     let _ = try_set_light(level);
 }
 
-/// The Kindle's sound level, 1 to 8: the audio manager's `speakerVolume` (10 to 80 in steps of 10).
+/// The media volume (1 to 8), in the RAM file the Music player applies to its audio (docs/contracts.md §1.2). The
+/// stock speaker level is not used: the Bluetooth stack overrides it while headphones are connected. No file means full.
+pub const VOLUME_FILE: &str = "/var/tmp/media/volume";
+
 pub fn sound_level() -> Option<u8> {
-    let volume = get_int("com.lab126.audiomgrd", "speakerVolume")?;
-    Some(((volume / 10) as u8).clamp(1, kl_core::layout::SOUND_LEVELS))
+    let text = std::fs::read_to_string(VOLUME_FILE).unwrap_or_default();
+    Some(text.trim().parse::<u8>().map(|level| level.clamp(1, kl_core::layout::SOUND_LEVELS)).unwrap_or(kl_core::layout::SOUND_LEVELS))
 }
 
-/// Set the sound level (1 to 8). Returns whether the audio manager took it.
+/// Set the media volume (1 to 8). Returns whether the file was written.
 pub fn set_sound_level(level: u8) -> bool {
-    set_int("com.lab126.audiomgrd", "speakerVolume", u32::from(level.clamp(1, kl_core::layout::SOUND_LEVELS)) * 10)
+    let level = level.clamp(1, kl_core::layout::SOUND_LEVELS);
+    let temporary = format!("{VOLUME_FILE}.tmp");
+    if let Some(folder) = std::path::Path::new(VOLUME_FILE).parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    std::fs::write(&temporary, format!("{level}\n"))
+        .and_then(|_| std::fs::rename(&temporary, VOLUME_FILE))
+        .is_ok()
 }
 
 pub fn light_level() -> Option<u32> {
