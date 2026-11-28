@@ -76,6 +76,29 @@ pub enum Input {
     Wake,
 }
 
+/// A two-finger gesture, reported once it is classified. Positions and distances are in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MultiTouch {
+    TwoFingerTap {
+        x: f32,
+        y: f32,
+        held_ms: u32,
+        /// Release point used by KOReader when the two-contact tap fails its timing rule.
+        fallback_x: f32,
+        fallback_y: f32,
+    },
+    TwoFingerSwipe {
+        dx: f32,
+        dy: f32,
+        start_x: f32,
+        start_y: f32,
+    },
+    Spread,
+    Pinch,
+    RotateClockwise,
+    RotateCounterclockwise,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceCmd {
     /// Choose model `index` of `models::MODELS` (saved in the settings).

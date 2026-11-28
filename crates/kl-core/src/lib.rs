@@ -25,5 +25,5 @@ pub use apps::{discover, App, IconSource, Launch};
 pub use config::Config;
 pub use layout::{Layout, Rect};
 pub use settings::{Rotation, Settings};
-pub use ui::{Action, DeviceCmd, Input, InstalledApp, Screen, Status, Ui, Usb};
+pub use ui::{Action, DeviceCmd, Input, InstalledApp, MultiTouch, Screen, Status, Ui, Usb};
 

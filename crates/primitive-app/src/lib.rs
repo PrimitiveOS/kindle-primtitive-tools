@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 use kl_core::{storage_lease::user_storage_is_mounted, Settings};
 use kl_kindle::{device, display::Display, profile};
 use primitive_input as input;
-use primitive_ui::{full_screen_message, Canvas, Input};
+use primitive_ui::{full_screen_message, Canvas, Input, MultiTouch};
 
 mod orientation;
 mod storage;
@@ -83,6 +83,11 @@ pub enum Change {
 pub trait App {
     fn draw(&self, canvas: &mut Canvas);
     fn input(&mut self, input: Input) -> Change;
+
+    /// A classified two-finger gesture. The default ignores it.
+    fn multi_touch(&mut self, _gesture: MultiTouch) -> Change {
+        Change::None
+    }
 
     /// A swipe with its horizontal start in screen coordinates.
     fn swipe(&mut self, input: Input, _start_x: f32) -> Change {

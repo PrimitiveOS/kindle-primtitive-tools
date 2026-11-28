@@ -3,7 +3,7 @@
 pub mod editor;
 mod widgets;
 
-pub use kl_core::{Input, Layout, Rect, Rotation, Status};
+pub use kl_core::{Input, Layout, MultiTouch, Rect, Rotation, Status};
 pub use kl_render::component::{icons, Align, Canvas, GrayImage, Icon, TextStyle};
 pub use kl_render::{changed_rect, for_panel};
 pub use primitive_keyboard::{Editor, Key, Layer, Press};
